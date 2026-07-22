@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
-import { Plus, Upload, MessageSquare, Trash2, X, Send } from 'lucide-react';
+import { Plus, Upload, MessageSquare, Trash2, X, Send, Loader2 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 
 const committeeData: Record<string, { name: string; lead: string; members: string[] }> = {
   youth: { name: 'Youth Conference', lead: 'John Doe', members: ['John Doe', 'Sarah Smith', 'Mike Johnson', 'Emily Davis'] },
@@ -19,14 +20,23 @@ const committeeData: Record<string, { name: string; lead: string; members: strin
   executive: { name: 'Executive Dinner', lead: 'Jennifer Taylor', members: ['Jennifer Taylor', 'David Lee', 'Lisa Wang'] },
 };
 
-const defaultTasks = [
-  { id: 1, title: 'Finalize speaker lineup', assignee: 'John Doe', status: 'in_progress', priority: 'high', dueDate: '2026-07-25' },
-  { id: 2, title: 'Book conference venue', assignee: 'Sarah Smith', status: 'done', priority: 'urgent', dueDate: '2026-07-20' },
-  { id: 3, title: 'Design event flyers', assignee: 'Mike Johnson', status: 'review', priority: 'medium', dueDate: '2026-07-28' },
-  { id: 4, title: 'Send invitation emails', assignee: '', status: 'todo', priority: 'high', dueDate: '2026-08-01' },
-  { id: 5, title: 'Prepare presentation materials', assignee: 'Emily Davis', status: 'in_progress', priority: 'medium', dueDate: '2026-07-30' },
-  { id: 6, title: 'Coordinate with A/V team', assignee: '', status: 'blocked', priority: 'urgent', dueDate: '2026-07-22' },
-];
+type Task = {
+  id: string;
+  title: string;
+  assignee: string;
+  status: string;
+  priority: string;
+  dueDate: string;
+};
+
+const mapRow = (row: Record<string, string>): Task => ({
+  id: row.id,
+  title: row.title,
+  assignee: row.assignee ?? '',
+  status: row.status,
+  priority: row.priority,
+  dueDate: row.due_date ?? '',
+});
 
 const statusStyle: Record<string, string> = {
   todo: 'bg-gray-100 text-gray-800',
@@ -47,8 +57,10 @@ export default function CommitteeTaskBoard() {
   const params = useParams();
   const committeeId = (params.id as string) ?? 'youth';
   const committee = committeeData[committeeId] ?? committeeData['youth'];
+  const supabase = createClient();
 
-  const [tasks, setTasks] = useState<typeof defaultTasks>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [showAddTask, setShowAddTask] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
@@ -58,31 +70,54 @@ export default function CommitteeTaskBoard() {
   const [newMessage, setNewMessage] = useState('');
 
   useEffect(() => {
-    const saved = localStorage.getItem('tasks_' + committeeId);
-    setTasks(saved ? JSON.parse(saved) : defaultTasks);
+    const loadTasks = async () => {
+      setIsLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('tasks')
+          .select('*')
+          .eq('committee_id', committeeId)
+          .order('created_at', { ascending: true });
+        if (error) throw error;
+        setTasks((data ?? []).map(mapRow));
+      } catch {
+        const saved = localStorage.getItem('tasks_' + committeeId);
+        setTasks(saved ? JSON.parse(saved) : []);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    loadTasks();
     const savedFiles = localStorage.getItem('files_' + committeeId);
     if (savedFiles) setFiles(JSON.parse(savedFiles));
     const savedMsgs = localStorage.getItem('chat_' + committeeId);
     if (savedMsgs) setMessages(JSON.parse(savedMsgs));
   }, [committeeId]);
 
-  const saveTasks = (t: typeof defaultTasks) => {
-    setTasks(t);
-    localStorage.setItem('tasks_' + committeeId, JSON.stringify(t));
+  const updateTask = async (id: string, field: string, value: string) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, [field]: value } : t));
+    const dbField = field === 'dueDate' ? 'due_date' : field;
+    await supabase.from('tasks').update({ [dbField]: value || null, updated_at: new Date().toISOString() }).eq('id', id);
   };
 
-  const updateTask = (id: number, field: string, value: string) =>
-    saveTasks(tasks.map(t => (t.id === id ? { ...t, [field]: value } : t)));
-
-  const addTask = () => {
+  const addTask = async () => {
     if (!newTaskTitle.trim()) return;
-    const t = { id: Date.now(), title: newTaskTitle.trim(), assignee: '', status: 'todo', priority: 'medium', dueDate: '' };
-    saveTasks([...tasks, t]);
-    setNewTaskTitle('');
-    setShowAddTask(false);
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({ committee_id: committeeId, title: newTaskTitle.trim(), assignee: '', status: 'todo', priority: 'medium', due_date: null })
+      .select()
+      .single();
+    if (!error && data) {
+      setTasks(prev => [...prev, mapRow(data)]);
+      setNewTaskTitle('');
+      setShowAddTask(false);
+    }
   };
 
-  const deleteTask = (id: number) => saveTasks(tasks.filter(t => t.id !== id));
+  const deleteTask = async (id: string) => {
+    setTasks(prev => prev.filter(t => t.id !== id));
+    await supabase.from('tasks').delete().eq('id', id);
+  };
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -135,6 +170,11 @@ export default function CommitteeTaskBoard() {
         </div>
 
         {/* Stats */}
+        {isLoading && (
+          <div className="flex items-center gap-2 text-sm text-gray-500 mb-4">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading tasks...
+          </div>
+        )}
         <div className="grid grid-cols-4 gap-4 mb-6">
           {[{ label: 'Total', val: stats.total, color: 'text-gray-900' }, { label: 'Completed', val: stats.done, color: 'text-green-600' }, { label: 'In Progress', val: stats.inProgress, color: 'text-blue-600' }, { label: 'Blocked', val: stats.blocked, color: 'text-red-600' }].map(s => (
             <div key={s.label} className="bg-white rounded-lg p-4 shadow-sm text-center">
@@ -156,6 +196,11 @@ export default function CommitteeTaskBoard() {
               <div className="col-span-1"></div>
             </div>
             <div className="divide-y divide-gray-100">
+              {tasks.length === 0 && !isLoading && !showAddTask && (
+                <div className="px-4 py-10 text-center text-sm text-gray-400">
+                  No tasks yet. Click <span className="font-medium text-blue-600">+ Add Task</span> to get started.
+                </div>
+              )}
               {tasks.map(task => (
                 <div key={task.id} className="grid grid-cols-12 gap-2 px-4 py-3 hover:bg-gray-50 items-center">
                   <div className="col-span-4">
