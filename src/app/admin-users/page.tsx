@@ -5,6 +5,7 @@ import { Users, Shield, Edit2, Save, Loader2 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import type { Profile, Committee, CommitteeRole, SystemRole } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
+import { useRequireAdmin } from '@/lib/use-require-admin';
 
 type EditableSystemRole = 'member' | 'admin';
 
@@ -27,6 +28,7 @@ const permissionMatrix: Record<SystemRole, { icon: string; description: string; 
 };
 
 export default function AdminUserManagement() {
+  const { allowed, checking } = useRequireAdmin();
   const supabase = createClient();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [committees, setCommittees] = useState<Committee[]>([]);
@@ -117,7 +119,7 @@ export default function AdminUserManagement() {
 
   const roleLabel = (role: SystemRole) => (role === 'super_admin' ? 'Super Admin' : role.charAt(0).toUpperCase() + role.slice(1));
 
-  if (isLoading) {
+  if (checking || !allowed || isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <Loader2 className="h-6 w-6 animate-spin text-gray-400" />

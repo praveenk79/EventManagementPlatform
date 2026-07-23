@@ -1,8 +1,9 @@
 'use client';
 
-import { LayoutTemplate } from 'lucide-react';
+import { LayoutTemplate, Loader2 } from 'lucide-react';
 import AdminNav from '@/components/AdminNav';
 import { templatesByCategory, COLUMN_TYPE_META } from '@/lib/list-templates';
+import { useRequireAdmin } from '@/lib/use-require-admin';
 
 const typeChipClass: Record<string, string> = {
   text: 'bg-gray-100 text-gray-700',
@@ -15,7 +16,16 @@ const typeChipClass: Record<string, string> = {
 };
 
 export default function AdminTemplates() {
+  const { allowed, checking } = useRequireAdmin();
   const groups = templatesByCategory();
+
+  if (checking || !allowed) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">

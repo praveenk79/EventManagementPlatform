@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import type { Committee, Profile } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
+import { useRequireAdmin } from '@/lib/use-require-admin';
 
 interface CommitteeMeta {
   icon: LucideIcon;
@@ -52,6 +53,7 @@ function statsFromStatuses(statuses: string[]): TaskStats {
 }
 
 export default function AdminDashboard() {
+  const { allowed, checking } = useRequireAdmin();
   const supabase = useMemo(() => createClient(), []);
   const [committees, setCommittees] = useState<Committee[]>([]);
   const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
@@ -121,7 +123,7 @@ export default function AdminDashboard() {
   const blockedTasks = allStats.reduce((sum, s) => sum + s.blocked, 0);
   const overallProgress = totalTasks === 0 ? 0 : Math.round((completedTasks / totalTasks) * 100);
 
-  if (isLoading) {
+  if (checking || !allowed || isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <Loader2 className="h-6 w-6 animate-spin text-gray-400" />

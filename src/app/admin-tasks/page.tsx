@@ -7,6 +7,7 @@ import { Loader2, Search, ArrowRight, AlertCircle } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import AdminNav from '@/components/AdminNav';
 import type { Committee, Profile } from '@/lib/rbac';
+import { useRequireAdmin } from '@/lib/use-require-admin';
 
 interface TaskRow {
   id: string;
@@ -60,6 +61,7 @@ function isOverdue(due: string | null, status: string): boolean {
 }
 
 function AdminTasksInner() {
+  const { allowed, checking } = useRequireAdmin();
   const supabase = useMemo(() => createClient(), []);
   const searchParams = useSearchParams();
   const initialFilter = searchParams.get('filter') ?? 'all';
@@ -101,7 +103,7 @@ function AdminTasksInner() {
 
   const activeCommittees = Object.values(committees).filter(c => !c.archived).sort((a, b) => a.name.localeCompare(b.name));
 
-  if (isLoading) {
+  if (checking || !allowed || isLoading) {
     return <div className="min-h-screen bg-gray-50 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-gray-400" /></div>;
   }
 

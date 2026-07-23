@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import type { Committee, Profile } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
+import { useRequireAdmin } from '@/lib/use-require-admin';
 
 function slugify(name: string) {
   return (
@@ -21,6 +22,7 @@ function slugify(name: string) {
 }
 
 export default function AdminCommitteeManagement() {
+  const { allowed, checking } = useRequireAdmin();
   const { profile } = useAuth();
   const supabase = createClient();
 
@@ -129,7 +131,7 @@ export default function AdminCommitteeManagement() {
     requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
   };
 
-  if (isLoading) {
+  if (checking || !allowed || isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <Loader2 className="h-6 w-6 animate-spin text-gray-400" />

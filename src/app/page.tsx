@@ -1,5 +1,8 @@
+'use client';
+
 import Link from 'next/link';
 import { Calendar, Users, Megaphone, ArrowRight, CheckCircle2, LayoutGrid, Table2 } from 'lucide-react';
+import { useAuth } from '@/lib/auth-context';
 
 const FEATURES = [
   {
@@ -42,6 +45,12 @@ const colorMap: Record<string, { bg: string; text: string; link: string }> = {
 };
 
 export default function HomePage() {
+  const { user, isAdmin, committeeRoles, loading } = useAuth();
+  const isSignedIn = !!user;
+  // Where a signed-in user's primary CTA should take them.
+  const primaryHref = isAdmin ? '/admin' : committeeRoles.length > 0 ? '/committee-portal' : '/programs';
+  const primaryLabel = isAdmin ? 'Go to Admin Dashboard' : committeeRoles.length > 0 ? 'Go to My Committees' : 'View Program';
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50 via-white to-white">
       {/* Hero */}
@@ -60,19 +69,41 @@ export default function HomePage() {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
-            <Link
-              href="/auth/login"
-              className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 shadow-md shadow-indigo-200 transition-all"
-            >
-              Get Started
-              <ArrowRight className="ml-2 h-5 w-5" />
-            </Link>
-            <Link
-              href="/programs"
-              className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors"
-            >
-              View Program
-            </Link>
+            {loading ? (
+              <div className="h-[52px] w-48 rounded-xl bg-gray-100 animate-pulse" />
+            ) : isSignedIn ? (
+              <>
+                <Link
+                  href={primaryHref}
+                  className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 shadow-md shadow-indigo-200 transition-all"
+                >
+                  {primaryLabel}
+                  <ArrowRight className="ml-2 h-5 w-5" />
+                </Link>
+                <Link
+                  href="/programs"
+                  className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors"
+                >
+                  View Program
+                </Link>
+              </>
+            ) : (
+              <>
+                <Link
+                  href="/auth/login"
+                  className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 shadow-md shadow-indigo-200 transition-all"
+                >
+                  Get Started
+                  <ArrowRight className="ml-2 h-5 w-5" />
+                </Link>
+                <Link
+                  href="/programs"
+                  className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors"
+                >
+                  View Program
+                </Link>
+              </>
+            )}
           </div>
 
           {/* Quick highlights */}
@@ -115,10 +146,10 @@ export default function HomePage() {
             Replace the spreadsheets in Drive and the endless WhatsApp threads. Assign work, track lists, and keep everyone aligned — live.
           </p>
           <Link
-            href="/auth/login"
+            href={isSignedIn ? primaryHref : '/auth/login'}
             className="inline-flex items-center justify-center px-8 py-3.5 text-base font-semibold rounded-xl text-indigo-700 bg-white hover:bg-indigo-50 shadow-md transition-colors"
           >
-            Sign In to Get Started
+            {isSignedIn ? primaryLabel : 'Sign In to Get Started'}
             <ArrowRight className="ml-2 h-5 w-5" />
           </Link>
         </div>
