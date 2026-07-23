@@ -28,23 +28,17 @@ export async function middleware(request: NextRequest) {
   );
 
   // Refreshing the auth token - keeps session alive
-  await supabase.auth.getUser();
+  const { data: { user } } = await supabase.auth.getUser();
 
-  // Optional: Protect routes that require authentication
-  // Uncomment the following lines to protect admin routes
-  /*
-  if (!user && request.nextUrl.pathname.startsWith('/admin')) {
+  const { pathname } = request.nextUrl;
+  const isPublicRoute = pathname === '/' || pathname.startsWith('/auth/');
+
+  if (!user && !isPublicRoute) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = '/auth/login';
+    redirectUrl.searchParams.set('next', pathname);
     return NextResponse.redirect(redirectUrl);
   }
-
-  if (!user && request.nextUrl.pathname.startsWith('/committee')) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = '/auth/login';
-    return NextResponse.redirect(redirectUrl);
-  }
-  */
 
   return supabaseResponse;
 }

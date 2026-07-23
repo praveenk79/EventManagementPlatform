@@ -4,10 +4,11 @@ import { NextResponse, type NextRequest } from 'next/server';
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
+  const next = searchParams.get('next') || '/';
 
   if (code) {
     // Create the redirect response first so we can set cookies on it
-    const supabaseResponse = NextResponse.redirect(`${origin}/admin`);
+    const supabaseResponse = NextResponse.redirect(`${origin}${next}`);
 
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,

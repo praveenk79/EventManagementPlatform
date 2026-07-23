@@ -1,38 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { User } from '@supabase/supabase-js';
 import { LogOut } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
-import { signOut } from '@/lib/supabase/utils';
+import { useAuth } from '@/lib/auth-context';
+
+const ROLE_LABEL: Record<string, string> = {
+  super_admin: 'Super Admin',
+  admin: 'Admin',
+  member: 'Member',
+};
 
 export default function UserMenu() {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const [isOpen, setIsOpen] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
-
-  useEffect(() => {
-    // Get initial user
-    const getUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      setUser(user);
-      setIsLoading(false);
-    };
-
-    getUser();
-
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setUser(session?.user ?? null);
-      }
-    );
-
-    return () => subscription.unsubscribe();
-  }, [supabase.auth]);
+  const { user, profile, signOut } = useAuth();
 
   const handleSignOut = async () => {
     try {
@@ -44,26 +26,19 @@ export default function UserMenu() {
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center space-x-2">
-        <div className="w-8 h-8 bg-gray-200 rounded-full animate-pulse" />
-      </div>
-    );
-  }
-
   if (!user) {
     return null;
   }
 
-  // Get user's display name or email
-  const displayName = user.user_metadata?.full_name || 
-                     user.user_metadata?.name || 
-                     user.email?.split('@')[0] || 
+  const displayName = profile?.full_name ||
+                     user.user_metadata?.full_name ||
+                     user.user_metadata?.name ||
+                     user.email?.split('@')[0] ||
                      'User';
-  
-  const userEmail = user.email || '';
-  const avatarUrl = user.user_metadata?.avatar_url || user.user_metadata?.picture;
+
+  const userEmail = profile?.email || user.email || '';
+  const avatarUrl = profile?.avatar_url || user.user_metadata?.avatar_url || user.user_metadata?.picture;
+  const roleLabel = profile ? ROLE_LABEL[profile.system_role] : null;
 
   return (
     <div className="relative">
@@ -104,6 +79,11 @@ export default function UserMenu() {
             <div className="px-4 py-3 border-b border-gray-200">
               <p className="text-sm font-medium text-gray-900">{displayName}</p>
               <p className="text-xs text-gray-500 truncate">{userEmail}</p>
+              {roleLabel && (
+                <span className="inline-block mt-1.5 text-[11px] font-semibold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                  {roleLabel}
+                </span>
+              )}
             </div>
 
             <div className="py-1">

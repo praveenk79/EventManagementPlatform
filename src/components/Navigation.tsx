@@ -2,114 +2,78 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
-import { Calendar, Home, Users, Settings } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+import { LayoutGrid, Home, CalendarDays, Users2, ShieldCheck } from 'lucide-react';
+import { useAuth } from '@/lib/auth-context';
 import UserMenu from './UserMenu';
+
+const BASE_NAV_ITEMS = [
+  { href: '/', label: 'Home', icon: Home, match: (p: string) => p === '/' },
+  { href: '/programs', label: 'Program', icon: CalendarDays, match: (p: string) => p.startsWith('/programs') },
+];
+
+const COMMITTEE_NAV_ITEM = { href: '/committee-portal', label: 'Committees', icon: Users2, match: (p: string) => p.startsWith('/committee') };
+const ADMIN_NAV_ITEM = { href: '/admin', label: 'Admin', icon: ShieldCheck, match: (p: string) => p.startsWith('/admin') };
 
 export default function Navigation() {
   const pathname = usePathname();
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const supabase = createClient();
+  const { user, isAdmin, committeeRoles, loading } = useAuth();
 
-  useEffect(() => {
-    // Check initial auth state
-    const checkAuth = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      setIsAuthenticated(!!user);
-    };
-
-    checkAuth();
-
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setIsAuthenticated(!!session?.user);
-      }
-    );
-
-    return () => subscription.unsubscribe();
-  }, [supabase.auth]);
-
-  const isActive = (path: string) => pathname === path;
+  const navItems = [
+    ...BASE_NAV_ITEMS,
+    ...(isAdmin || committeeRoles.length > 0 ? [COMMITTEE_NAV_ITEM] : []),
+    ...(isAdmin ? [ADMIN_NAV_ITEM] : []),
+  ];
 
   return (
-    <nav className="bg-white shadow-sm border-b sticky top-0 z-50">
+    <nav className="bg-white border-b border-gray-200 sticky top-0 z-50">
       <div className="container mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
+        <div className="flex items-center justify-between h-[68px] gap-6">
           {/* Logo */}
-          <Link href="/" className="flex items-center space-x-2">
-            <Calendar className="h-6 w-6 text-blue-600" />
-            <span className="font-bold text-xl">EventPlatform</span>
+          <Link href="/" className="flex items-center gap-2.5 shrink-0">
+            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center shadow-sm">
+              <LayoutGrid className="h-5 w-5 text-white" strokeWidth={2.25} />
+            </div>
+            <div className="hidden sm:flex flex-col leading-none">
+              <span className="font-bold text-[17px] text-gray-900 tracking-tight">EventManagement</span>
+              <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Platform</span>
+            </div>
           </Link>
 
           {/* Navigation Links */}
-          <div className="hidden md:flex items-center space-x-6">
-            <Link
-              href="/"
-              className={`flex items-center space-x-2 text-sm font-medium transition-colors ${
-                isActive('/')
-                  ? 'text-blue-600'
-                  : 'text-gray-700 hover:text-blue-600'
-              }`}
-            >
-              <Home className="h-4 w-4" />
-              <span>Home</span>
-            </Link>
-            <Link
-              href="/programs"
-              className={`flex items-center space-x-2 text-sm font-medium transition-colors ${
-                isActive('/programs')
-                  ? 'text-blue-600'
-                  : 'text-gray-700 hover:text-blue-600'
-              }`}
-            >
-              <Calendar className="h-4 w-4" />
-              <span>Program</span>
-            </Link>
-            <Link
-              href="/committee-portal"
-              className={`flex items-center space-x-2 text-sm font-medium transition-colors ${
-                isActive('/committee-portal')
-                  ? 'text-purple-600'
-                  : 'text-gray-700 hover:text-purple-600'
-              }`}
-            >
-              <Users className="h-4 w-4" />
-              <span>Committees</span>
-            </Link>
-            <Link
-              href="/admin"
-              className={`flex items-center space-x-2 text-sm font-medium transition-colors ${
-                pathname?.startsWith('/admin')
-                  ? 'text-orange-600'
-                  : 'text-gray-700 hover:text-orange-600'
-              }`}
-            >
-              <Settings className="h-4 w-4" />
-              <span>Admin</span>
-            </Link>
+          <div className="hidden md:flex items-center justify-end gap-1 flex-1">
+            {navItems.map(item => {
+              const Icon = item.icon;
+              const active = item.match(pathname ?? '');
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`flex items-center gap-2 text-sm px-3.5 py-2 rounded-lg transition-colors ${
+                    active
+                      ? 'bg-indigo-50 text-indigo-700 font-semibold'
+                      : 'text-gray-600 font-medium hover:bg-gray-50 hover:text-gray-900'
+                  }`}
+                >
+                  <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.25 : 2} />
+                  <span>{item.label}</span>
+                </Link>
+              );
+            })}
           </div>
 
-          {/* Auth Buttons / User Menu */}
-          <div className="flex items-center space-x-4">
-            {isAuthenticated ? (
+          {/* Auth Button / User Menu */}
+          <div className="flex items-center gap-3 shrink-0">
+            {loading ? (
+              <div className="w-8 h-8 rounded-full bg-gray-100 animate-pulse" />
+            ) : user ? (
               <UserMenu />
             ) : (
-              <>
-                <Link
-                  href="/auth/login"
-                  className="text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors"
-                >
-                  Sign In
-                </Link>
-                <Link
-                  href="/auth/register"
-                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
-                >
-                  Get Started
-                </Link>
-              </>
+              <Link
+                href="/auth/login"
+                className="px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg shadow-sm hover:bg-indigo-700 transition-colors"
+              >
+                Sign In
+              </Link>
             )}
           </div>
         </div>

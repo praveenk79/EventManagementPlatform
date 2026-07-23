@@ -1,11 +1,11 @@
 {
-  "name": "Tech Event Platform",
-  "short_name": "EventPlatform",
+  "name": "EventManagement Platform",
+  "short_name": "EventManagement",
   "description": "Single pane of glass for 500+ attendees and 12 organizing committees. Replace WhatsApp chaos with organized workflows.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#2563eb",
+  "theme_color": "#4f46e5",
   "orientation": "portrait-primary",
   "icons": [
     {
