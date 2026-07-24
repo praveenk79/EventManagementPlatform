@@ -223,7 +223,7 @@ export default function ProgramsPage() {
                   <span className="text-gray-500 text-sm">{formatDate(day.date)}</span>
                 )}
                 {isEditing && (
-                  <button onClick={() => deleteDay(day.id)} className="ml-auto text-gray-400 hover:text-red-600 transition-colors" title="Delete day">
+                  <button onClick={() => deleteDay(day.id)} className="ml-auto p-2 -mr-2 text-gray-400 hover:text-red-600 transition-colors" title="Delete day" aria-label="Delete day">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
@@ -240,7 +240,7 @@ export default function ProgramsPage() {
                       onDragStart={() => setDraggedSessionId(session.id)}
                       onDragOver={e => e.preventDefault()}
                       onDrop={() => handleDrop(day.id, session.id)}
-                      className={`flex gap-4 px-6 py-4 ${i < day.sessions.length - 1 ? 'border-b border-gray-100' : ''} ${
+                      className={`flex gap-3 sm:gap-4 px-4 sm:px-6 py-4 ${i < day.sessions.length - 1 ? 'border-b border-gray-100' : ''} ${
                         isEditing ? 'cursor-move hover:bg-gray-50' : ''
                       }`}
                     >
@@ -275,8 +275,9 @@ export default function ProgramsPage() {
                       {isEditing && (
                         <button
                           onClick={() => deleteSession(day.id, session.id)}
-                          className="text-gray-300 hover:text-red-600 transition-colors shrink-0"
+                          className="p-2 -mr-2 self-start text-gray-300 hover:text-red-600 transition-colors shrink-0"
                           title="Delete session"
+                          aria-label="Delete session"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>

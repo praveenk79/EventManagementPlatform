@@ -33,7 +33,9 @@ export default function RootLayout({
       <body className={inter.className}>
         <AuthProvider>
           <Navigation />
-          <main>{children}</main>
+          {/* Bottom padding on mobile leaves room for the fixed bottom tab bar
+              (plus the iOS home-bar safe area); removed from md up. */}
+          <main className="pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-0">{children}</main>
           <Toaster position="top-center" richColors closeButton />
         </AuthProvider>
       </body>

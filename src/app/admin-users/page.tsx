@@ -155,7 +155,7 @@ export default function AdminUserManagement() {
           <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
             <Shield className="h-6 w-6 text-indigo-600" /> Permission Matrix
           </h2>
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
             {Object.entries(permissionMatrix).map(([role, info]) => (
               <div key={role} className="border border-gray-200 rounded-lg p-4">
                 <div className="text-3xl mb-2">{info.icon}</div>

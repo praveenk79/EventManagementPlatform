@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { Plus, Upload, MessageSquare, Trash2, X, Send, Loader2, AlertCircle, Users2, Search, UserPlus, Table2, Pencil, Check } from 'lucide-react';
+import { Plus, Upload, MessageSquare, Trash2, X, Send, Loader2, AlertCircle, Users2, Search, UserPlus, Table2, Pencil, Check, Bell, BellRing } from 'lucide-react';
 import { toast } from 'sonner';
+import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
+import { pushSupported, isStandalone, notificationPermission, enablePushNotifications } from '@/lib/push';
 import type { Committee, Profile, CommitteeRole } from '@/lib/rbac';
 
 type Task = {
@@ -32,6 +34,11 @@ type ChatMessage = {
   body: string;
   senderName: string;
   createdAt: string;
+  userId?: string | null;
+  // `pending` = shown optimistically, not yet confirmed by the server.
+  // `failed`  = the insert errored; we keep it visible so the text isn't lost.
+  pending?: boolean;
+  failed?: boolean;
 };
 
 const mapTaskRow = (row: {
@@ -132,6 +139,13 @@ export default function CommitteeTaskBoard() {
   const [isUploading, setIsUploading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
+  // Auto-scroll anchor: we scroll this into view whenever the thread changes.
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  // Push notifications: 'default' = not yet asked, 'granted' = on,
+  // 'denied' = blocked, 'unsupported' = this browser/context can't do push,
+  // 'needs-install' = iOS Safari tab (must add to home screen first).
+  const [pushState, setPushState] = useState<'default' | 'granted' | 'denied' | 'unsupported' | 'needs-install'>('unsupported');
+  const [enablingPush, setEnablingPush] = useState(false);
 
   const isHead = isCommitteeHead(committeeId);
 
@@ -208,6 +222,7 @@ export default function CommitteeTaskBoard() {
         body: m.body,
         senderName: nameFor(m.user_id),
         createdAt: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        userId: m.user_id,
       }))
     );
 
@@ -218,21 +233,108 @@ export default function CommitteeTaskBoard() {
     loadEverything();
   }, [loadEverything]);
 
-  // Live updates so heads/admins see task changes without asking anyone.
-  // `silent: true` — refresh the data in place, no full-page spinner flash.
+  // Always-current sender-name resolver, kept in a ref so the realtime channel
+  // below never needs to re-subscribe when `members`/`profile` change.
+  const nameResolverRef = useRef<(userId: string | null) => string>(() => 'Unknown');
+  useEffect(() => {
+    nameResolverRef.current = (userId: string | null) => {
+      if (!userId) return 'Unknown';
+      if (userId === profile?.id) return profile.full_name || profile.email;
+      const match = members.find(p => p.id === userId);
+      return match?.full_name || match?.email || 'Unknown';
+    };
+  }, [members, profile]);
+
+  // Live updates so the team sees changes without asking anyone.
+  // Tasks/members do a `silent: true` in-place refresh (no spinner flash).
+  // Chat is handled differently — see below.
   useEffect(() => {
     if (!committeeId) return;
     const silentReload = () => loadEverything({ silent: true });
+
+    // Chat: append/remove the single changed message instead of reloading the
+    // whole workspace — this is what makes it feel instant like WhatsApp.
+    type MessageRow = { id: string; body: string; user_id: string | null; created_at: string };
+    const onMessageChange = (payload: RealtimePostgresChangesPayload<MessageRow>) => {
+      if (payload.eventType === 'DELETE') {
+        const oldId = (payload.old as Partial<MessageRow>).id;
+        if (oldId) setMessages(prev => prev.filter(m => m.id !== oldId));
+        return;
+      }
+      if (payload.eventType !== 'INSERT') return;
+      const row = payload.new;
+      setMessages(prev => {
+        // Server row already in the list (our own confirmed send, or a
+        // duplicate event) — leave the thread untouched.
+        if (prev.some(m => m.id === row.id)) return prev;
+        const incoming: ChatMessage = {
+          id: row.id,
+          body: row.body,
+          senderName: nameResolverRef.current(row.user_id),
+          createdAt: new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          userId: row.user_id,
+        };
+        // Reconcile our own optimistic bubble: swap the pending temp row for
+        // the real server row instead of showing the message twice.
+        const pendingIdx = prev.findIndex(m => m.pending && m.userId === row.user_id && m.body === row.body);
+        if (pendingIdx !== -1) {
+          const next = [...prev];
+          next[pendingIdx] = incoming;
+          return next;
+        }
+        return [...prev, incoming];
+      });
+    };
+
     const channel = supabase
       .channel(`committee-${committeeId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `committee_id=eq.${committeeId}` }, silentReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_members', filter: `committee_id=eq.${committeeId}` }, silentReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_messages', filter: `committee_id=eq.${committeeId}` }, silentReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_messages', filter: `committee_id=eq.${committeeId}` }, onMessageChange)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
     };
   }, [committeeId, supabase, loadEverything]);
+
+  // Keep the newest message in view whenever the thread changes.
+  useEffect(() => {
+    if (showChat) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, showChat]);
+
+  // Work out the notification button's initial state on mount.
+  useEffect(() => {
+    if (!pushSupported()) {
+      // iOS can support push, but only once installed to the home screen.
+      const iOS = /iP(hone|ad|od)/.test(navigator.userAgent);
+      setPushState(iOS && !isStandalone() ? 'needs-install' : 'unsupported');
+      return;
+    }
+    if (typeof navigator !== 'undefined' && /iP(hone|ad|od)/.test(navigator.userAgent) && !isStandalone()) {
+      setPushState('needs-install');
+      return;
+    }
+    const perm = notificationPermission();
+    setPushState(perm === 'unsupported' ? 'unsupported' : perm);
+  }, []);
+
+  const handleEnablePush = async () => {
+    if (!profile) return;
+    setEnablingPush(true);
+    try {
+      const ok = await enablePushNotifications(profile.id);
+      if (ok) {
+        setPushState('granted');
+        toast.success('Notifications on — you’ll be alerted about new messages.');
+      } else {
+        const perm = notificationPermission();
+        setPushState(perm === 'denied' ? 'denied' : perm === 'unsupported' ? 'unsupported' : 'default');
+        toast.error(perm === 'denied' ? 'Notifications are blocked in your browser settings.' : 'Could not turn on notifications.');
+      }
+    } finally {
+      setEnablingPush(false);
+    }
+  };
 
   const memberName = (userId: string | null) => {
     if (!userId) return 'Unassigned';
@@ -372,9 +474,48 @@ export default function CommitteeTaskBoard() {
     if (!newMessage.trim() || !profile) return;
     const body = newMessage.trim();
     setNewMessage('');
-    const { error } = await supabase.from('committee_messages').insert({ committee_id: committeeId, user_id: profile.id, body });
-    if (error) toast.error('Message failed to send.');
-    loadEverything({ silent: true });
+
+    // Show the message immediately (optimistic) with a temporary client id.
+    const tempId = `temp-${crypto.randomUUID()}`;
+    const optimistic: ChatMessage = {
+      id: tempId,
+      body,
+      senderName: profile.full_name || profile.email,
+      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      userId: profile.id,
+      pending: true,
+    };
+    setMessages(prev => [...prev, optimistic]);
+
+    const { data, error } = await supabase
+      .from('committee_messages')
+      .insert({ committee_id: committeeId, user_id: profile.id, body })
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      // Mark the bubble as failed and put the text back so it isn't lost.
+      setMessages(prev => prev.map(m => (m.id === tempId ? { ...m, pending: false, failed: true } : m)));
+      setNewMessage(body);
+      toast.error('Message failed to send.');
+      return;
+    }
+
+    // Confirm: swap the temp id for the real one and clear the pending state.
+    // If the realtime echo already replaced it, this is a harmless no-op.
+    setMessages(prev =>
+      prev.some(m => m.id === data.id)
+        ? prev.filter(m => m.id !== tempId)
+        : prev.map(m => (m.id === tempId ? { ...m, id: data.id, pending: false } : m))
+    );
+
+    // Fire-and-forget: push a notification to the other committee members.
+    // Never blocks or fails the send — notifications are best-effort.
+    fetch('/api/notify-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ committeeId, body }),
+    }).catch(() => {});
   };
 
   const addMember = async (userId: string, role: CommitteeRole = 'volunteer') => {
@@ -899,29 +1040,59 @@ export default function CommitteeTaskBoard() {
             </div>
           )}
 
-          {/* Chat Panel */}
+          {/* Chat Panel — floating widget.
+              Mobile: full-screen sheet (room to read/type).
+              Desktop (sm+): docked in the bottom-right corner. */}
           {showChat && (
-            <div className="w-72 bg-white rounded-lg shadow flex flex-col" style={{ height: '520px' }}>
-              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 rounded-t-lg">
+            <div className="fixed inset-0 z-50 flex flex-col bg-white sm:inset-auto sm:bottom-6 sm:right-6 sm:w-80 sm:h-[560px] sm:rounded-lg sm:shadow-2xl sm:border sm:border-gray-200">
+              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 sm:rounded-t-lg">
                 <h3 className="font-semibold text-white">Team Discussion</h3>
-                <button onClick={() => setShowChat(false)}><X className="h-4 w-4 text-slate-300 hover:text-white" /></button>
+                <div className="flex items-center gap-1">
+                  {pushState === 'granted' ? (
+                    <span className="text-slate-400" title="Notifications on"><BellRing className="h-4 w-4" /></span>
+                  ) : pushState === 'default' ? (
+                    <button
+                      onClick={handleEnablePush}
+                      disabled={enablingPush}
+                      className="flex items-center gap-1 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-60 rounded-full px-2.5 py-1"
+                      title="Get notified about new messages"
+                    >
+                      {enablingPush ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bell className="h-3.5 w-3.5" />}
+                      Notify me
+                    </button>
+                  ) : null}
+                  <button onClick={() => setShowChat(false)} aria-label="Close chat" className="ml-1"><X className="h-5 w-5 text-slate-300 hover:text-white" /></button>
+                </div>
               </div>
+              {pushState === 'needs-install' && (
+                <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11px] text-amber-800">
+                  To get message alerts on iPhone, tap <span className="font-semibold">Share → Add to Home Screen</span>, then open the app from that icon.
+                </div>
+              )}
+              {pushState === 'denied' && (
+                <div className="px-4 py-2 bg-gray-50 border-b border-gray-100 text-[11px] text-gray-500">
+                  Notifications are blocked. Enable them for this site in your browser settings to get message alerts.
+                </div>
+              )}
               <div className="flex-1 overflow-y-auto p-3 space-y-3">
                 {messages.length === 0
                   ? <p className="text-xs text-gray-400 text-center mt-6">No messages yet. Start the conversation!</p>
                   : messages.map(m => (
-                    <div key={m.id}>
+                    <div key={m.id} className={m.pending ? 'opacity-60' : ''}>
                       <div className="flex items-baseline gap-1 mb-0.5">
                         <span className="text-xs font-semibold text-purple-700">{m.senderName}</span>
-                        <span className="text-xs text-gray-400">{m.createdAt}</span>
+                        <span className="text-xs text-gray-400">
+                          {m.failed ? 'Failed to send' : m.pending ? 'Sending…' : m.createdAt}
+                        </span>
                       </div>
-                      <div className="bg-purple-50 rounded-lg px-3 py-2 text-sm text-gray-800 break-words">{m.body}</div>
+                      <div className={`rounded-lg px-3 py-2 text-sm break-words ${m.failed ? 'bg-red-50 text-red-800' : 'bg-purple-50 text-gray-800'}`}>{m.body}</div>
                     </div>
                   ))}
+                <div ref={chatEndRef} />
               </div>
-              <div className="p-3 border-t flex gap-2">
+              <div className="p-3 border-t flex gap-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:pb-3">
                 <input type="text" value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} placeholder="Type a message..." className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-purple-400" />
-                <button onClick={sendMessage} className="p-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
+                <button onClick={sendMessage} aria-label="Send message" className="p-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 shrink-0">
                   <Send className="h-4 w-4" />
                 </button>
               </div>

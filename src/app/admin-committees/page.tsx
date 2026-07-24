@@ -183,7 +183,7 @@ export default function AdminCommitteeManagement() {
             <h2 className="text-lg font-semibold text-gray-900 mb-4">
               {editingId ? 'Edit Committee' : 'New Committee'}
             </h2>
-            <div className="grid grid-cols-3 gap-6 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">Committee Name *</label>
                 <input
@@ -236,7 +236,7 @@ export default function AdminCommitteeManagement() {
         )}
 
         {/* Stats */}
-        <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="grid grid-cols-3 gap-2 sm:gap-4 mb-8">
           <div className="bg-white rounded-lg p-6 shadow-sm">
             <div className="text-3xl font-bold text-indigo-600">{committees.filter(c => !c.archived).length}</div>
             <div className="text-gray-600 text-sm mt-1">Active Committees</div>
@@ -271,15 +271,15 @@ export default function AdminCommitteeManagement() {
                       committee.archived ? 'border-gray-300 opacity-60' : 'border-indigo-600'
                     }`}
                   >
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-3 mb-2">
-                        <h3 className="text-lg font-semibold text-gray-900">{committee.name}</h3>
+                        <h3 className="text-lg font-semibold text-gray-900 truncate">{committee.name}</h3>
                         {committee.archived && (
-                          <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded font-medium">Archived</span>
+                          <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded font-medium shrink-0">Archived</span>
                         )}
                       </div>
                       <p className="text-gray-600 text-sm mb-3">{committee.description || 'No description'}</p>
-                      <div className="flex items-center gap-6 text-sm text-gray-500">
+                      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-gray-500">
                         <div className="flex items-center gap-1">
                           <Users className="h-4 w-4" /> Head:{' '}
                           <span className="font-medium text-gray-700">{head?.full_name || head?.email || 'Unassigned'}</span>
@@ -288,7 +288,7 @@ export default function AdminCommitteeManagement() {
                         <div className="text-xs text-gray-400">Created {new Date(committee.created_at).toLocaleDateString()}</div>
                       </div>
                     </div>
-                    <div className="flex gap-2 ml-4">
+                    <div className="flex gap-2 ml-4 shrink-0">
                       <button
                         onClick={() => startEdit(committee)}
                         className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"

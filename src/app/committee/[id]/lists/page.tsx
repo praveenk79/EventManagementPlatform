@@ -199,7 +199,7 @@ export default function CommitteeListsIndex() {
                   <p className="text-sm text-gray-500">{rowCounts[list.id] ?? 0} row{(rowCounts[list.id] ?? 0) !== 1 ? 's' : ''}</p>
                 </Link>
                 {isHead && (
-                  <button onClick={() => deleteList(list.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0" title="Delete list">
+                  <button onClick={() => deleteList(list.id)} className="p-2.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0" title="Delete list" aria-label="Delete list">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
