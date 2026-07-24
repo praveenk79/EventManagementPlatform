@@ -30,7 +30,13 @@ begin
     'tasks',
     'committee_messages',
     'committee_list_rows',
-    'committee_list_columns'
+    'committee_list_columns',
+    -- Added with supabase/chat_reads.sql: lets reading the chat on one device
+    -- clear the unread badge on that user's other open devices.
+    'committee_chat_reads',
+    -- Added with supabase/task_comments.sql: two people on the same task see
+    -- each other's comments appear without a refresh.
+    'task_comments'
   ]
   loop
     if not exists (

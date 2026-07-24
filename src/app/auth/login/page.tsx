@@ -19,6 +19,8 @@ function LoginForm() {
       setError('An unexpected error occurred. Please try again.');
     } else if (errorParam === 'no_code') {
       setError('No authorization code received. Please try again.');
+    } else if (errorParam === 'account_removed') {
+      setError('Your access to this workspace has been removed. Contact an organizer if you think this is a mistake.');
     }
   }, [searchParams]);
 

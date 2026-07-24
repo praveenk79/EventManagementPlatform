@@ -40,6 +40,26 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
+  // A soft-deleted user may still hold a valid session cookie from before an
+  // admin removed them. RLS already denies them all data, but without this they
+  // could still load the shell of every page. Sign them out instead.
+  if (user && !isPublicRoute) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('deleted_at')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profile?.deleted_at) {
+      await supabase.auth.signOut();
+      const redirectUrl = request.nextUrl.clone();
+      redirectUrl.pathname = '/auth/login';
+      redirectUrl.searchParams.delete('next');
+      redirectUrl.searchParams.set('error', 'account_removed');
+      return NextResponse.redirect(redirectUrl);
+    }
+  }
+
   return supabaseResponse;
 }
 

@@ -29,11 +29,26 @@ type CommitteeFile = {
   createdAt: string;
 };
 
+type TaskComment = {
+  id: string;
+  taskId: string;
+  body: string;
+  authorId: string | null;
+  authorName: string;
+  createdAt: string;
+  // Optimistic-send flags, same convention as ChatMessage below.
+  pending?: boolean;
+  failed?: boolean;
+};
+
 type ChatMessage = {
   id: string;
   body: string;
   senderName: string;
   createdAt: string;
+  // Raw server timestamp, kept alongside the display string so unread counts
+  // can be compared against the viewer's last-read time.
+  createdAtIso: string;
   userId?: string | null;
   // `pending` = shown optimistically, not yet confirmed by the server.
   // `failed`  = the insert errored; we keep it visible so the text isn't lost.
@@ -146,6 +161,18 @@ export default function CommitteeTaskBoard() {
   // 'needs-install' = iOS Safari tab (must add to home screen first).
   const [pushState, setPushState] = useState<'default' | 'granted' | 'denied' | 'unsupported' | 'needs-install'>('unsupported');
   const [enablingPush, setEnablingPush] = useState(false);
+  // When this user last had this committee's chat open (from
+  // committee_chat_reads). null = never opened it, so everything counts as
+  // unread. Drives the bubble's badge.
+  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
+
+  // Task comments. All of a committee's comments are loaded up front (they're
+  // small and it keeps the per-task count badges honest without N queries);
+  // `expandedTaskId` controls which task's thread is unfolded inline.
+  const [comments, setComments] = useState<TaskComment[]>([]);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [newComment, setNewComment] = useState('');
+  const [postingComment, setPostingComment] = useState(false);
 
   const isHead = isCommitteeHead(committeeId);
 
@@ -186,16 +213,34 @@ export default function CommitteeTaskBoard() {
       setAllProfiles(everyone ?? []);
     }
 
-    const [{ data: taskRows, error: taskError }, { data: fileRows }, { data: messageRows }] = await Promise.all([
+    const [{ data: taskRows, error: taskError }, { data: fileRows }, { data: messageRows }, { data: readRow }] = await Promise.all([
       supabase.from('tasks').select('id, title, assignee_id, status, priority, due_date').eq('committee_id', committeeId).order('created_at', { ascending: true }),
       supabase.from('committee_files').select('id, file_name, file_size_bytes, storage_path, uploaded_by, created_at').eq('committee_id', committeeId).order('created_at', { ascending: false }),
       supabase.from('committee_messages').select('id, body, user_id, created_at').eq('committee_id', committeeId).order('created_at', { ascending: true }),
+      // Unread baseline. maybeSingle() because there's no row until the first
+      // time this person opens the chat.
+      supabase.from('committee_chat_reads').select('last_read_at').eq('committee_id', committeeId).maybeSingle(),
     ]);
+
+    setLastReadAt(readRow?.last_read_at ?? null);
 
     if (taskError) {
       setLoadError('Could not load tasks. You may not have access to this committee.');
     } else {
       setTasks((taskRows ?? []).map(mapTaskRow));
+    }
+
+    // Comments for this committee's tasks. Separate query because it depends on
+    // the task ids we just fetched.
+    const taskIds = (taskRows ?? []).map(t => t.id);
+    let commentRows: { id: string; task_id: string; body: string; author_id: string | null; created_at: string }[] = [];
+    if (taskIds.length > 0) {
+      const { data } = await supabase
+        .from('task_comments')
+        .select('id, task_id, body, author_id, created_at')
+        .in('task_id', taskIds)
+        .order('created_at', { ascending: true });
+      commentRows = data ?? [];
     }
 
     const nameFor = (userId: string | null) => {
@@ -222,7 +267,19 @@ export default function CommitteeTaskBoard() {
         body: m.body,
         senderName: nameFor(m.user_id),
         createdAt: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        createdAtIso: m.created_at,
         userId: m.user_id,
+      }))
+    );
+
+    setComments(
+      commentRows.map(c => ({
+        id: c.id,
+        taskId: c.task_id,
+        body: c.body,
+        authorId: c.author_id,
+        authorName: nameFor(c.author_id),
+        createdAt: new Date(c.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
       }))
     );
 
@@ -236,6 +293,12 @@ export default function CommitteeTaskBoard() {
   // Always-current sender-name resolver, kept in a ref so the realtime channel
   // below never needs to re-subscribe when `members`/`profile` change.
   const nameResolverRef = useRef<(userId: string | null) => string>(() => 'Unknown');
+  // Current task ids, so the comments realtime handler can ignore comments on
+  // other committees' tasks without the channel re-subscribing on every edit.
+  const taskIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    taskIdsRef.current = new Set(tasks.map(t => t.id));
+  }, [tasks]);
   useEffect(() => {
     nameResolverRef.current = (userId: string | null) => {
       if (!userId) return 'Unknown';
@@ -272,6 +335,7 @@ export default function CommitteeTaskBoard() {
           body: row.body,
           senderName: nameResolverRef.current(row.user_id),
           createdAt: new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          createdAtIso: row.created_at,
           userId: row.user_id,
         };
         // Reconcile our own optimistic bubble: swap the pending temp row for
@@ -286,11 +350,47 @@ export default function CommitteeTaskBoard() {
       });
     };
 
+    type CommentRow = { id: string; task_id: string; body: string; author_id: string | null; created_at: string };
+    const onCommentChange = (payload: RealtimePostgresChangesPayload<CommentRow>) => {
+      if (payload.eventType === 'DELETE') {
+        const oldId = (payload.old as Partial<CommentRow>).id;
+        if (oldId) setComments(prev => prev.filter(c => c.id !== oldId));
+        return;
+      }
+      if (payload.eventType !== 'INSERT') return;
+      const row = payload.new;
+      // Not one of this committee's tasks — ignore it.
+      if (!taskIdsRef.current.has(row.task_id)) return;
+      setComments(prev => {
+        if (prev.some(c => c.id === row.id)) return prev;
+        const incoming: TaskComment = {
+          id: row.id,
+          taskId: row.task_id,
+          body: row.body,
+          authorId: row.author_id,
+          authorName: nameResolverRef.current(row.author_id),
+          createdAt: new Date(row.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+        };
+        // Reconcile our own optimistic comment instead of showing it twice.
+        const pendingIdx = prev.findIndex(c => c.pending && c.authorId === row.author_id && c.body === row.body);
+        if (pendingIdx !== -1) {
+          const next = [...prev];
+          next[pendingIdx] = incoming;
+          return next;
+        }
+        return [...prev, incoming];
+      });
+    };
+
     const channel = supabase
       .channel(`committee-${committeeId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `committee_id=eq.${committeeId}` }, silentReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_members', filter: `committee_id=eq.${committeeId}` }, silentReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_messages', filter: `committee_id=eq.${committeeId}` }, onMessageChange)
+      // task_comments has no committee_id to filter on, so this listens to all
+      // comment changes and drops any whose task isn't in this committee (RLS
+      // already limits delivery to committees the viewer can see).
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_comments' }, onCommentChange)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
@@ -301,6 +401,37 @@ export default function CommitteeTaskBoard() {
   useEffect(() => {
     if (showChat) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, showChat]);
+
+  // Unread = messages sent by someone else after the last time I opened this
+  // chat. Your own messages never count (you don't need reminding of them), and
+  // optimistic/failed bubbles are excluded since they have no server identity.
+  const unreadCount = useMemo(() => {
+    if (showChat) return 0; // reading it right now
+    const readTime = lastReadAt ? new Date(lastReadAt).getTime() : 0;
+    return messages.filter(m =>
+      !m.pending && !m.failed &&
+      m.userId !== profile?.id &&
+      new Date(m.createdAtIso).getTime() > readTime
+    ).length;
+  }, [messages, lastReadAt, profile?.id, showChat]);
+
+  // Stamp "read" whenever the chat is open and new messages land while it's
+  // open. Guarded on document visibility: a background tab with the panel left
+  // open must not silently mark messages read that nobody actually looked at.
+  useEffect(() => {
+    if (!showChat || !committeeId || !profile) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+
+    let cancelled = false;
+    const stamp = async () => {
+      const { data, error } = await supabase.rpc('mark_committee_chat_read', { target_committee_id: committeeId });
+      // Silent on failure: a missed read-stamp just means the badge reappears
+      // next load. Not worth a toast interrupting the conversation.
+      if (!cancelled && !error && data) setLastReadAt(data as string);
+    };
+    stamp();
+    return () => { cancelled = true; };
+  }, [showChat, committeeId, profile, supabase, messages.length]);
 
   // Work out the notification button's initial state on mount.
   useEffect(() => {
@@ -470,6 +601,64 @@ export default function CommitteeTaskBoard() {
     }
   };
 
+  // Comments post optimistically like chat messages do, so the note appears the
+  // instant you hit Enter rather than after a round trip.
+  const addComment = async (taskId: string) => {
+    if (!newComment.trim() || !profile) return;
+    const body = newComment.trim();
+    setNewComment('');
+    setPostingComment(true);
+
+    const tempId = `temp-${crypto.randomUUID()}`;
+    setComments(prev => [
+      ...prev,
+      {
+        id: tempId,
+        taskId,
+        body,
+        authorId: profile.id,
+        authorName: profile.full_name || profile.email,
+        createdAt: new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+        pending: true,
+      },
+    ]);
+
+    const { data, error } = await supabase
+      .from('task_comments')
+      .insert({ task_id: taskId, author_id: profile.id, body })
+      .select('id')
+      .single();
+
+    setPostingComment(false);
+
+    if (error || !data) {
+      // Keep the text visible and put it back in the box so it isn't lost.
+      setComments(prev => prev.map(c => (c.id === tempId ? { ...c, pending: false, failed: true } : c)));
+      setNewComment(body);
+      toast.error('Comment failed to save.');
+      return;
+    }
+
+    setComments(prev =>
+      prev.some(c => c.id === data.id)
+        ? prev.filter(c => c.id !== tempId)
+        : prev.map(c => (c.id === tempId ? { ...c, id: data.id, pending: false } : c))
+    );
+  };
+
+  const deleteComment = async (commentId: string) => {
+    const snapshot = comments;
+    setComments(prev => prev.filter(c => c.id !== commentId));
+
+    const { error } = await supabase.from('task_comments').delete().eq('id', commentId);
+    if (error) {
+      setComments(snapshot); // put it back — the delete didn't happen
+      toast.error('Could not delete that comment.');
+      return;
+    }
+    toast.success('Comment deleted');
+  };
+
   const sendMessage = async () => {
     if (!newMessage.trim() || !profile) return;
     const body = newMessage.trim();
@@ -482,6 +671,7 @@ export default function CommitteeTaskBoard() {
       body,
       senderName: profile.full_name || profile.email,
       createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      createdAtIso: new Date().toISOString(),
       userId: profile.id,
       pending: true,
     };
@@ -703,8 +893,12 @@ export default function CommitteeTaskBoard() {
       );
     }
 
+    const taskComments = comments.filter(c => c.taskId === task.id);
+    const isExpanded = expandedTaskId === task.id;
+
     return (
-      <div key={task.id} className="flex flex-col gap-2 md:grid md:grid-cols-12 md:gap-2 px-4 py-3 hover:bg-gray-50 md:items-center">
+      <div key={task.id}>
+      <div className="flex flex-col gap-2 md:grid md:grid-cols-12 md:gap-2 px-4 py-3 hover:bg-gray-50 md:items-center">
         {/* Title */}
         <div className="md:col-span-4">
           <p className="px-2 py-1 text-sm font-medium md:font-normal text-gray-900">{task.title}</p>
@@ -731,8 +925,18 @@ export default function CommitteeTaskBoard() {
             {task.dueDate || '—'}{due === 'overdue' && ' · overdue'}{due === 'soon' && ' · soon'}
           </p>
         </div>
-        {/* Edit / Delete */}
+        {/* Comments / Edit / Delete */}
         <div className="md:col-span-1 flex items-center md:justify-end gap-1">
+          <button
+            onClick={() => { setExpandedTaskId(isExpanded ? null : task.id); setNewComment(''); }}
+            title={taskComments.length > 0 ? `${taskComments.length} comment${taskComments.length !== 1 ? 's' : ''}` : 'Add a note'}
+            className={`p-1 rounded transition-colors flex items-center gap-0.5 ${
+              isExpanded ? 'text-indigo-600 bg-indigo-50' : taskComments.length > 0 ? 'text-indigo-500 hover:bg-indigo-50' : 'text-gray-300 hover:text-indigo-500 hover:bg-indigo-50'
+            }`}
+          >
+            <MessageSquare className="h-4 w-4" />
+            {taskComments.length > 0 && <span className="text-xs font-semibold">{taskComments.length}</span>}
+          </button>
           {canEditAny && (
             <button onClick={() => startEditTask(task)} title="Edit" className="p-1 hover:bg-indigo-50 rounded text-gray-300 hover:text-indigo-500 transition-colors">
               <Pencil className="h-4 w-4" />
@@ -744,6 +948,65 @@ export default function CommitteeTaskBoard() {
             </button>
           )}
         </div>
+      </div>
+
+      {/* Inline comment thread — notes on this task, visible to the whole
+          committee so the head and assignee can talk here instead of WhatsApp. */}
+      {isExpanded && (
+        <div className="px-4 pb-4 pt-1 bg-gray-50 border-t border-gray-100">
+          <div className="md:pl-2 space-y-3">
+            {taskComments.length === 0 ? (
+              <p className="text-xs text-gray-400">No notes yet. Add the first one below.</p>
+            ) : (
+              <div className="space-y-2">
+                {taskComments.map(c => (
+                  <div key={c.id} className={`group flex items-start gap-2 ${c.pending ? 'opacity-60' : ''}`}>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <span className="text-xs font-semibold text-indigo-700">{c.authorName}</span>
+                        <span className="text-[11px] text-gray-400">
+                          {c.failed ? 'Failed to save' : c.pending ? 'Saving…' : c.createdAt}
+                        </span>
+                      </div>
+                      <p className={`text-sm break-words rounded-lg px-3 py-2 mt-0.5 ${c.failed ? 'bg-red-50 text-red-800' : 'bg-white border border-gray-200 text-gray-800'}`}>
+                        {c.body}
+                      </p>
+                    </div>
+                    {/* Author or head can delete — matches the RLS policy, so
+                        the button is never offered when the DB would refuse. */}
+                    {!c.pending && (c.authorId === profile?.id || isHead) && (
+                      <button
+                        onClick={() => deleteComment(c.id)}
+                        title="Delete note"
+                        className="p-1.5 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newComment}
+                onChange={e => setNewComment(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !postingComment && addComment(task.id)}
+                placeholder="Add a note…"
+                className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-indigo-400 bg-white"
+              />
+              <button
+                onClick={() => addComment(task.id)}
+                disabled={postingComment || !newComment.trim()}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 shrink-0 flex items-center gap-1"
+              >
+                {postingComment ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     );
   };
@@ -789,9 +1052,6 @@ export default function CommitteeTaskBoard() {
             </Link>
             <button onClick={() => { setShowFiles(!showFiles); setShowChat(false); setShowMembers(false); }} className={`px-4 py-2 rounded-lg flex items-center gap-2 border text-sm font-medium transition-colors ${showFiles ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}>
               <Upload className="h-4 w-4" /> Files {files.length > 0 && <span className="bg-indigo-100 text-indigo-800 text-xs px-1.5 py-0.5 rounded-full">{files.length}</span>}
-            </button>
-            <button onClick={() => { setShowChat(!showChat); setShowFiles(false); setShowMembers(false); }} className={`px-4 py-2 rounded-lg flex items-center gap-2 border text-sm font-medium transition-colors ${showChat ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}>
-              <MessageSquare className="h-4 w-4" /> Chat {messages.length > 0 && <span className="bg-purple-100 text-purple-800 text-xs px-1.5 py-0.5 rounded-full">{messages.length}</span>}
             </button>
           </div>
         </div>
@@ -1040,12 +1300,32 @@ export default function CommitteeTaskBoard() {
             </div>
           )}
 
+          {/* Chat launcher — floating bubble in the bottom-right corner.
+              Always rendered (stable target) and acts as a toggle; the desktop
+              panel is offset upward so it never sits on top of this.
+              Mobile bottom offset clears the fixed tab bar in Navigation.tsx;
+              z-[60] keeps it above the open panel (z-50) and the nav (z-50). */}
+          <button
+            onClick={() => { setShowChat(!showChat); setShowFiles(false); setShowMembers(false); }}
+            aria-label={showChat ? 'Close team chat' : 'Open team chat'}
+            className={`fixed right-4 bottom-[calc(72px+env(safe-area-inset-bottom))] z-[60] md:right-6 md:bottom-6 h-16 w-16 rounded-full text-white shadow-xl flex items-center justify-center transition-colors ${unreadCount > 0 ? 'bg-purple-600 hover:bg-purple-700' : 'bg-slate-600 hover:bg-slate-700'} ${showChat ? 'max-md:hidden' : ''}`}
+          >
+            {showChat ? <X className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
+            {/* Genuine unread count — messages from others since you last looked. */}
+            {!showChat && unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[22px] h-[22px] px-1 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center border-2 border-white">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+
           {/* Chat Panel — floating widget.
               Mobile: full-screen sheet (room to read/type).
-              Desktop (sm+): docked in the bottom-right corner. */}
+              Desktop (md+): docked bottom-right, sitting ABOVE the launcher
+              bubble (bottom-28 clears the 64px bubble + its 24px offset). */}
           {showChat && (
-            <div className="fixed inset-0 z-50 flex flex-col bg-white sm:inset-auto sm:bottom-6 sm:right-6 sm:w-80 sm:h-[560px] sm:rounded-lg sm:shadow-2xl sm:border sm:border-gray-200">
-              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 sm:rounded-t-lg">
+            <div className="fixed inset-0 z-50 flex flex-col bg-white md:inset-auto md:bottom-28 md:right-6 md:w-80 md:h-[560px] md:rounded-lg md:shadow-2xl md:border md:border-gray-200">
+              <div className="flex items-center justify-between px-4 py-3 bg-slate-800 md:rounded-t-lg">
                 <h3 className="font-semibold text-white">Team Discussion</h3>
                 <div className="flex items-center gap-1">
                   {pushState === 'granted' ? (
@@ -1090,7 +1370,7 @@ export default function CommitteeTaskBoard() {
                   ))}
                 <div ref={chatEndRef} />
               </div>
-              <div className="p-3 border-t flex gap-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:pb-3">
+              <div className="p-3 border-t flex gap-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] md:pb-3">
                 <input type="text" value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} placeholder="Type a message..." className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-purple-400" />
                 <button onClick={sendMessage} aria-label="Send message" className="p-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 shrink-0">
                   <Send className="h-4 w-4" />

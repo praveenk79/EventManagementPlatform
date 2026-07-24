@@ -1,14 +1,19 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Users, Shield, Edit2, Save, Loader2 } from 'lucide-react';
+import { Users, Shield, Edit2, Save, Loader2, Trash2, RotateCcw, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
+import { useAuth } from '@/lib/auth-context';
 import type { Profile, Committee, CommitteeRole, SystemRole } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
 import { useRequireAdmin } from '@/lib/use-require-admin';
 
 type EditableSystemRole = 'member' | 'admin';
+
+// profiles rows carry soft-delete columns (supabase/soft_delete_users.sql) that
+// the shared Profile type doesn't model.
+type ManagedProfile = Profile & { deleted_at: string | null };
 
 const permissionMatrix: Record<SystemRole, { icon: string; description: string; permissions: string[] }> = {
   super_admin: {
@@ -30,8 +35,9 @@ const permissionMatrix: Record<SystemRole, { icon: string; description: string; 
 
 export default function AdminUserManagement() {
   const { allowed, checking } = useRequireAdmin();
+  const { profile: currentUser } = useAuth();
   const supabase = createClient();
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profiles, setProfiles] = useState<ManagedProfile[]>([]);
   const [committees, setCommittees] = useState<Committee[]>([]);
   const [memberships, setMemberships] = useState<{ committee_id: string; user_id: string; role: CommitteeRole }[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -40,14 +46,20 @@ export default function AdminUserManagement() {
   const [editingRole, setEditingRole] = useState<EditableSystemRole>('member');
   const [editingCommitteeRoles, setEditingCommitteeRoles] = useState<{ committeeId: string; role: CommitteeRole }[]>([]);
 
+  // Delete is destructive enough to need an explicit confirm step rather than a
+  // one-click action buried among the row's other buttons.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [showRemoved, setShowRemoved] = useState(false);
+
   const load = useCallback(async () => {
     setIsLoading(true);
     const [{ data: profileRows }, { data: committeeRows }, { data: membershipRows }] = await Promise.all([
-      supabase.from('profiles').select('id, email, full_name, avatar_url, system_role').order('email'),
+      supabase.from('profiles').select('id, email, full_name, avatar_url, system_role, deleted_at').order('email'),
       supabase.from('committees').select('*'),
       supabase.from('committee_members').select('committee_id, user_id, role'),
     ]);
-    setProfiles(profileRows ?? []);
+    setProfiles((profileRows ?? []) as ManagedProfile[]);
     setCommittees(committeeRows ?? []);
     setMemberships(membershipRows ?? []);
     setIsLoading(false);
@@ -59,7 +71,37 @@ export default function AdminUserManagement() {
 
   const membershipsForUser = (userId: string) => memberships.filter(m => m.user_id === userId);
 
-  const startEdit = (p: Profile) => {
+  // Soft delete: the profile row stays so their name keeps showing on the tasks
+  // and messages they left behind — only their access goes away. The RPC does
+  // the stamp + membership strip + role reset in one transaction.
+  const deleteUser = async (p: ManagedProfile) => {
+    setBusyUserId(p.id);
+    const { error } = await supabase.rpc('soft_delete_user', { target_user_id: p.id });
+    setBusyUserId(null);
+    setConfirmDeleteId(null);
+
+    if (error) {
+      toast.error(error.message || 'Could not remove this user.');
+      return;
+    }
+    toast.success(`${p.full_name || p.email} no longer has access`);
+    load();
+  };
+
+  const restoreUser = async (p: ManagedProfile) => {
+    setBusyUserId(p.id);
+    const { error } = await supabase.rpc('restore_user', { target_user_id: p.id });
+    setBusyUserId(null);
+
+    if (error) {
+      toast.error(error.message || 'Could not restore this user.');
+      return;
+    }
+    toast.success(`${p.full_name || p.email} restored as a member`);
+    load();
+  };
+
+  const startEdit = (p: ManagedProfile) => {
     setEditingUserId(p.id);
     setEditingRole(p.system_role === 'admin' ? 'admin' : 'member');
     setEditingCommitteeRoles(membershipsForUser(p.id).map(m => ({ committeeId: m.committee_id, role: m.role })));
@@ -130,6 +172,12 @@ export default function AdminUserManagement() {
 
   const roleLabel = (role: SystemRole) => (role === 'super_admin' ? 'Super Admin' : role.charAt(0).toUpperCase() + role.slice(1));
 
+  // Removed users are hidden behind a toggle rather than dropped from the page,
+  // so an accidental delete is visibly recoverable.
+  const activeProfiles = profiles.filter(p => !p.deleted_at);
+  const removedProfiles = profiles.filter(p => p.deleted_at);
+  const visibleProfiles = showRemoved ? [...activeProfiles, ...removedProfiles] : activeProfiles;
+
   if (checking || !allowed || isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -176,17 +224,28 @@ export default function AdminUserManagement() {
 
         {/* Users List */}
         <div className="space-y-4">
-          <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Users className="h-6 w-6" /> Users ({profiles.length})
-          </h2>
-          {profiles.length === 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <Users className="h-6 w-6" /> Users ({activeProfiles.length})
+            </h2>
+            {removedProfiles.length > 0 && (
+              <button
+                onClick={() => setShowRemoved(!showRemoved)}
+                className="text-sm font-medium text-gray-600 hover:text-gray-900 underline"
+              >
+                {showRemoved ? 'Hide' : 'Show'} removed ({removedProfiles.length})
+              </button>
+            )}
+          </div>
+          {activeProfiles.length === 0 ? (
             <div className="bg-white rounded-lg p-8 text-center text-gray-500">No one has signed in yet.</div>
           ) : (
             <div className="space-y-3">
-              {profiles.map(p => {
+              {visibleProfiles.map(p => {
                 const userMemberships = membershipsForUser(p.id);
+                const isRemoved = !!p.deleted_at;
                 return (
-                  <div key={p.id} className="bg-white rounded-lg shadow-sm p-6">
+                  <div key={p.id} className={`rounded-lg shadow-sm p-6 ${isRemoved ? 'bg-gray-100 border border-gray-200' : 'bg-white'}`}>
                     {editingUserId === p.id ? (
                       <div className="space-y-6">
                         <div>
@@ -263,13 +322,17 @@ export default function AdminUserManagement() {
                       </div>
                     ) : (
                       <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <h3 className="text-lg font-semibold text-gray-900">{p.full_name || 'Unnamed'}</h3>
+                        <div className="flex-1 min-w-0">
+                          <h3 className={`text-lg font-semibold ${isRemoved ? 'text-gray-500' : 'text-gray-900'}`}>{p.full_name || 'Unnamed'}</h3>
                           <p className="text-sm text-gray-600 mb-3">{p.email}</p>
-                          <div className="flex items-center gap-3 mb-3">
-                            <span className={`px-3 py-1 rounded-full text-sm font-medium ${getRoleColor(p.system_role)}`}>
-                              {roleLabel(p.system_role)}
-                            </span>
+                          <div className="flex flex-wrap items-center gap-3 mb-3">
+                            {isRemoved ? (
+                              <span className="px-3 py-1 rounded-full text-sm font-medium bg-gray-200 text-gray-700">Access removed</span>
+                            ) : (
+                              <span className={`px-3 py-1 rounded-full text-sm font-medium ${getRoleColor(p.system_role)}`}>
+                                {roleLabel(p.system_role)}
+                              </span>
+                            )}
                             {userMemberships.length > 0 && (
                               <span className="text-sm text-gray-600">
                                 Member of {userMemberships.length} committee{userMemberships.length !== 1 ? 's' : ''}
@@ -289,9 +352,71 @@ export default function AdminUserManagement() {
                             </div>
                           )}
                         </div>
-                        <div className="flex gap-2 ml-4">
-                          <button onClick={() => startEdit(p)} className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors">
-                            <Edit2 className="h-5 w-5" />
+                        <div className="flex gap-2 ml-4 shrink-0">
+                          {isRemoved ? (
+                            <button
+                              onClick={() => restoreUser(p)}
+                              disabled={busyUserId === p.id}
+                              title="Restore access"
+                              className="p-2 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1 text-sm font-medium"
+                            >
+                              {busyUserId === p.id ? <Loader2 className="h-5 w-5 animate-spin" /> : <RotateCcw className="h-5 w-5" />}
+                              Restore
+                            </button>
+                          ) : (
+                            <>
+                              <button onClick={() => startEdit(p)} title="Edit roles" className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors">
+                                <Edit2 className="h-5 w-5" />
+                              </button>
+                              {/* Super admins are permanent, and deleting yourself is
+                                  never intentional — the RPC rejects both, so don't
+                                  offer the button. */}
+                              {p.system_role !== 'super_admin' && p.id !== currentUser?.id && (
+                                <button
+                                  onClick={() => setConfirmDeleteId(p.id)}
+                                  title="Remove access"
+                                  className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                >
+                                  <Trash2 className="h-5 w-5" />
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Confirm step — spells out exactly what happens, since
+                        "delete" here means access, not history. */}
+                    {confirmDeleteId === p.id && (
+                      <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                        <div className="flex items-start gap-2 mb-3">
+                          <AlertTriangle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+                          <div className="text-sm text-red-800">
+                            <p className="font-semibold mb-1">Remove {p.full_name || p.email}?</p>
+                            <p>
+                              They lose access to everything and are taken off{' '}
+                              {userMemberships.length > 0
+                                ? `${userMemberships.length} committee${userMemberships.length !== 1 ? 's' : ''}`
+                                : 'all committees'}
+                              . Their name stays on tasks and messages they&apos;ve already been part of, and you can restore them later.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => deleteUser(p)}
+                            disabled={busyUserId === p.id}
+                            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium disabled:opacity-60 flex items-center gap-2"
+                          >
+                            {busyUserId === p.id && <Loader2 className="h-4 w-4 animate-spin" />}
+                            Yes, remove access
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                          >
+                            Cancel
                           </button>
                         </div>
                       </div>

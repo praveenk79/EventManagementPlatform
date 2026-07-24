@@ -43,10 +43,54 @@ browser/device that a user granted notification permission on (keyed by
 the server sender uses the service_role key (bypasses RLS) to read recipients'
 subscriptions when fanning out. Run it in the SQL Editor.
 
+**`supabase/chat_reads.sql`** (added + CONFIRMED RUN 2026-07-24, but the badge it
+feeds is still not showing a count — see Open issues) — `committee_chat_reads (user_id,
+committee_id, last_read_at)`, PK on `(user_id, committee_id)`. Stores when each
+person last had a committee's chat panel open, so the chat bubble can show a
+real unread count instead of a lifetime message total. RLS is own-rows-only for
+select/insert/update — deliberately NOT readable by heads/admins ("has X read
+this?" is surveillance, not coordination). Writes go through
+`mark_committee_chat_read(uuid)` (security invoker, so RLS still applies) rather
+than a client-side timestamp, because a device with a fast clock would otherwise
+mark not-yet-arrived messages as read; the function uses `now()` (server clock)
+and `greatest(...)` so read position is monotonic and can't be rewound by an
+out-of-order request. **Degrades gracefully if unrun**: the load query returns
+null, `lastReadAt` stays null, and every message from another person counts as
+unread — i.e. roughly the old total-count behaviour, no crash.
+
+**`supabase/soft_delete_users.sql`** (added + CONFIRMED RUN 2026-07-24; delete
+and restore both click-tested working) — adds
+`profiles.deleted_at` + `deleted_by` for soft-deleting users from
+`/admin-users`. Hard delete was rejected: profiles are FK'd from tasks and
+messages, so removing the row turns event history into "Unknown".
+**IMPORTANT — this file rewrites `is_admin()`, `is_committee_member()` and
+`is_committee_head()`** to return false for a deleted user, which is what makes
+deletion actually revoke access everywhere (every other policy in the app is
+built on those three). If admin access breaks after running it, this is the file
+to look at. Also adds `is_deleted_user()`, plus `soft_delete_user(uuid)` /
+`restore_user(uuid)` RPCs (security definer, any admin may call; they reject
+deleting yourself or either hardcoded super-admin email, and do the stamp +
+membership-strip + role-reset in one transaction). Restore does NOT bring back
+committee roles — they aren't stored anywhere, so re-assign manually.
+
+**`supabase/task_comments.sql`** (added + CONFIRMED RUN 2026-07-24; commenting
+click-tested working) —
+`task_comments (id, task_id, author_id, body, created_at)` + helper
+`task_committee_id(uuid)`. View/insert = any committee member of the task's
+committee (deliberately not restricted to head/assignee — it's a two-way note);
+delete = author or head; no UPDATE policy, so comments are immutable like chat
+messages. Note the reason it's a table and not a `tasks.notes` column: the
+`guard_task_update()` trigger reverts every non-`status` column for non-head
+assignees, so a notes column would be un-writable by exactly the volunteers who
+need it.
+
 **`supabase/enable_realtime.sql`** (added 2026-07-24, CONFIRMED RUN
 2026-07-24) — adds `profiles`, `committee_members`, `tasks`,
 `committee_messages`, `committee_list_rows`, `committee_list_columns` to the
-`supabase_realtime` publication. Verified present via
+`supabase_realtime` publication. **Gained `committee_chat_reads` and
+`task_comments` on 2026-07-24 — re-run it after `chat_reads.sql` and
+`task_comments.sql`** so read-state syncs across a user's devices and two people
+on the same task see each other's comments live. Verified present via
 `select tablename from pg_publication_tables where pubname = 'supabase_realtime';`
 Without this, `postgres_changes` subscriptions connect but never receive
 events. Re-check with that query if realtime ever appears silently inert.
@@ -126,6 +170,63 @@ volume concern). Flow:
 - **iOS caveat**: notifications require the user to Add to Home Screen and open
   from that icon (iOS 16.4+). Android works in-browser.
 
+## Chat launcher bubble + unread badge — added 2026-07-24
+The committee workspace's old header "Chat" button was replaced by an
+**always-visible 64px floating bubble** in the bottom-right of
+`committee/[id]/page.tsx` (rendered just before the chat panel block). It
+toggles: `MessageSquare` icon when closed, `X` when open. `z-[60]` puts it above
+both the panel (`z-50`) and the nav (`z-50`); the mobile bottom offset
+`bottom-[calc(72px+env(safe-area-inset-bottom))]` clears the tab bar.
+- Because the bubble is always present on desktop, the **panel was moved up** to
+  `md:bottom-28` so it doesn't cover it. The panel's breakpoints were also
+  changed `sm:` → `md:` to match the bubble's, so the docked-card and
+  full-screen-sheet layouts switch at the same width the bubble repositions at.
+  On mobile the bubble is hidden while open (`max-md:hidden`) since the panel is
+  full-screen there — closing is via the header X.
+- **Badge is a true unread count**, not a message total: `unreadCount` (useMemo)
+  counts messages where sender ≠ me and `createdAtIso > lastReadAt`, excluding
+  `pending`/`failed` optimistic bubbles. Bubble is purple when unread > 0, slate
+  grey otherwise. `ChatMessage` gained a `createdAtIso` field (raw server
+  timestamp) alongside the pre-existing display-formatted `createdAt` — set it
+  in all three places a `ChatMessage` is constructed (initial load, realtime
+  insert, optimistic send).
+- Read state is stamped by an effect keyed on
+  `[showChat, committeeId, profile, supabase, messages.length]` calling
+  `supabase.rpc('mark_committee_chat_read')`. It early-returns when
+  `document.hidden` so a backgrounded tab left open doesn't mark messages read
+  that nobody saw. Failures are silent by design.
+- Requires `supabase/chat_reads.sql` (see above).
+
+## User soft delete + task comments — added 2026-07-24
+- **Delete on `/admin-users`** (`src/app/admin-users/page.tsx`): trash icon per
+  row → an inline red confirm panel spelling out what happens (access gone, off
+  N committees, history kept, restorable) → `soft_delete_user` RPC. Removed
+  users are hidden behind a "Show removed (N)" toggle rather than dropped from
+  the page, and render greyed with a Restore button. The button is not rendered
+  for super-admins or for yourself (the RPC also rejects both). Profile rows are
+  typed locally as `ManagedProfile = Profile & { deleted_at }` — the shared
+  `Profile` type in `rbac.ts` does not model the soft-delete columns.
+- **`src/middleware.ts` now checks `deleted_at`** on every non-public request
+  and signs out + redirects to `/auth/login?error=account_removed`. Without
+  this, a deleted user holding a live session cookie could still load page
+  shells; the login page renders a message for that error code. This adds one
+  `profiles` select per request — the obvious optimisation later is to fold it
+  into the session/JWT claims instead.
+- **Task comments** live inline in `committee/[id]/page.tsx`, NOT in a drawer
+  (user chose inline). A `MessageSquare` button with a count sits in each task
+  row's action cell; clicking sets `expandedTaskId`, unfolding a thread on a
+  grey background directly beneath that row. `renderTaskRow`'s read-only branch
+  is now wrapped in an outer `<div key={task.id}>` holding both the row and the
+  thread — the grid row itself no longer carries the key.
+- All of a committee's comments load up front in `loadEverything` (one `.in()`
+  query over the committee's task ids) so per-row counts are accurate without a
+  query per row. Posting is optimistic with temp ids + pending/failed states,
+  copying the chat pattern; delete is optimistic with a snapshot rollback.
+- Realtime: the comments binding on channel `committee-${id}` is **unfiltered**
+  (`task_comments` has no `committee_id`), so the handler drops rows whose
+  `task_id` isn't in `taskIdsRef` — a ref, so the channel never re-subscribes
+  when tasks change.
+
 ## Mobile / responsive ("behave like an app") — added 2026-07-24
 Approach is **CSS/Tailwind breakpoints only** (no JS device detection / no
 `useIsMobile` hook) — chosen deliberately to avoid first-paint flicker and SSR
@@ -166,6 +267,28 @@ hydration mismatches. Default mobile-first, layer desktop with `sm:`/`md:`.
   `/speaker` — mostly legacy/stub pages from the pre-migration prototype, not
   the current production surface. `/events-management` and `/events` are
   known unimplemented stubs (deferred multi-event support).
+
+## Open issues — unresolved, pick up here
+- **Unread chat badge does not show a count (2026-07-24, DEFERRED by user after
+  a long debugging session — resume here, don't re-litigate what's ruled out).**
+  Code is in `committee/[id]/page.tsx` (`unreadCount` useMemo + the
+  `mark_committee_chat_read` RPC effect); user confirmed both
+  `supabase/chat_reads.sql` and the re-run of `enable_realtime.sql` completed.
+  Typecheck/lint clean. Symptom: bubble stays slate grey with no number.
+  - **Ruled out:** login/auth (working fine — an `AuthPKCECodeVerifierMissingError`
+    seen in the dev log was an incidental half-finished flow from a port
+    3001→3000 restart, NOT a regression); the SQL not having been run.
+  - **Not yet checked — start here:** (1) whether `unreadCount` is 0 because
+    every message in the tested committee was sent by the viewer (own messages
+    are excluded by design, so single-account testing can never show a badge —
+    this may be the whole answer); (2) whether the `committee_chat_reads` select
+    in `loadEverything` errors silently — it has no error handling, so an RLS or
+    404 failure would leave `lastReadAt` null with no console noise; (3) whether
+    the mark-read effect is firing so aggressively (it's keyed on
+    `messages.length`) that it stamps read before the badge can ever render;
+    (4) whether `createdAtIso` is actually populated on the realtime-insert path.
+  - Add a temporary console.log of `{messages.length, lastReadAt, unreadCount}`
+    to settle (1)–(4) in one page load rather than guessing.
 
 ## Known gaps (not yet addressed)
 - No automated test suite.
