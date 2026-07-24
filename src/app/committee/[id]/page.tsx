@@ -135,9 +135,12 @@ export default function CommitteeTaskBoard() {
 
   const isHead = isCommitteeHead(committeeId);
 
-  const loadEverything = useCallback(async () => {
+  // `silent` skips the full-page loading spinner — used for background
+  // refreshes (realtime events, post-save re-fetches) so the screen doesn't
+  // flash back to a loading state every time data changes.
+  const loadEverything = useCallback(async (opts: { silent?: boolean } = {}) => {
     if (!committeeId || !user) return;
-    setIsLoading(true);
+    if (!opts.silent) setIsLoading(true);
     setLoadError(null);
     setAccessDenied(false);
 
@@ -216,13 +219,15 @@ export default function CommitteeTaskBoard() {
   }, [loadEverything]);
 
   // Live updates so heads/admins see task changes without asking anyone.
+  // `silent: true` — refresh the data in place, no full-page spinner flash.
   useEffect(() => {
     if (!committeeId) return;
+    const silentReload = () => loadEverything({ silent: true });
     const channel = supabase
       .channel(`committee-${committeeId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `committee_id=eq.${committeeId}` }, loadEverything)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_members', filter: `committee_id=eq.${committeeId}` }, loadEverything)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_messages', filter: `committee_id=eq.${committeeId}` }, loadEverything)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `committee_id=eq.${committeeId}` }, silentReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_members', filter: `committee_id=eq.${committeeId}` }, silentReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_messages', filter: `committee_id=eq.${committeeId}` }, silentReload)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
@@ -281,7 +286,7 @@ export default function CommitteeTaskBoard() {
 
     if (error) {
       toast.error('That change was not saved — you may not have permission to edit this field.');
-      loadEverything();
+      loadEverything({ silent: true });
     } else {
       setTasks(prev => prev.map(t => (t.id === draftTask.id ? draftTask : t)));
       toast.success('Saved');
@@ -311,7 +316,7 @@ export default function CommitteeTaskBoard() {
     const { error } = await supabase.from('tasks').delete().eq('id', id);
     if (error) {
       toast.error('Could not delete that task.');
-      loadEverything();
+      loadEverything({ silent: true });
     } else {
       toast.success('Task deleted');
     }
@@ -338,7 +343,7 @@ export default function CommitteeTaskBoard() {
     }
     setIsUploading(false);
     e.target.value = '';
-    loadEverything();
+    loadEverything({ silent: true });
     if (failed > 0) {
       toast.error(`${failed} file${failed !== 1 ? 's' : ''} failed to upload.`);
     } else {
@@ -357,7 +362,7 @@ export default function CommitteeTaskBoard() {
     const { error: deleteError } = await supabase.from('committee_files').delete().eq('id', f.id);
     if (removeError || deleteError) {
       toast.error('Could not delete that file.');
-      loadEverything();
+      loadEverything({ silent: true });
     } else {
       toast.success('File deleted');
     }
@@ -369,7 +374,7 @@ export default function CommitteeTaskBoard() {
     setNewMessage('');
     const { error } = await supabase.from('committee_messages').insert({ committee_id: committeeId, user_id: profile.id, body });
     if (error) toast.error('Message failed to send.');
-    loadEverything();
+    loadEverything({ silent: true });
   };
 
   const addMember = async (userId: string, role: CommitteeRole = 'volunteer') => {
@@ -379,7 +384,7 @@ export default function CommitteeTaskBoard() {
       return;
     }
     setMemberSearch('');
-    loadEverything();
+    loadEverything({ silent: true });
     toast.success('Member added');
   };
 
@@ -388,7 +393,7 @@ export default function CommitteeTaskBoard() {
     const { error } = await supabase.from('committee_members').update({ role }).eq('committee_id', committeeId).eq('user_id', userId);
     if (error) {
       toast.error('Could not change that role.');
-      loadEverything();
+      loadEverything({ silent: true });
     } else {
       toast.success('Role updated');
     }
@@ -402,7 +407,7 @@ export default function CommitteeTaskBoard() {
     } else {
       toast.success('Member removed');
     }
-    loadEverything();
+    loadEverything({ silent: true });
   };
 
   const memberIdSet = new Set(members.map(m => m.id));

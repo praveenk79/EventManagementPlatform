@@ -62,9 +62,12 @@ export default function ListDetail() {
 
   const isHead = isCommitteeHead(committeeId);
 
-  const load = useCallback(async () => {
+  // `silent` skips the full-page loading spinner — used for background
+  // refreshes (realtime events, post-save re-fetches) so the screen doesn't
+  // flash back to a loading state every time data changes.
+  const load = useCallback(async (opts: { silent?: boolean } = {}) => {
     if (!listId || !user) return;
-    setIsLoading(true);
+    if (!opts.silent) setIsLoading(true);
     const { data: list, error } = await supabase.from('committee_lists').select('id, name').eq('id', listId).single();
     if (error || !list) {
       setNotFound(true);
@@ -87,10 +90,11 @@ export default function ListDetail() {
   // Live updates so everyone editing the list sees changes without refreshing.
   useEffect(() => {
     if (!listId) return;
+    const silentReload = () => load({ silent: true });
     const channel = supabase
       .channel(`list-${listId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_list_rows', filter: `list_id=eq.${listId}` }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_list_columns', filter: `list_id=eq.${listId}` }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_list_rows', filter: `list_id=eq.${listId}` }, silentReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_list_columns', filter: `list_id=eq.${listId}` }, silentReload)
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [listId, supabase, load]);
