@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Users, Shield, Edit2, Save, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import type { Profile, Committee, CommitteeRole, SystemRole } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
@@ -84,8 +85,11 @@ export default function AdminUserManagement() {
     const target = profiles.find(p => p.id === editingUserId);
     if (!target) return;
 
+    let hadError = false;
+
     if (target.system_role !== 'super_admin') {
-      await supabase.from('profiles').update({ system_role: editingRole }).eq('id', editingUserId);
+      const { error } = await supabase.from('profiles').update({ system_role: editingRole }).eq('id', editingUserId);
+      if (error) hadError = true;
     }
 
     const before = membershipsForUser(editingUserId);
@@ -96,14 +100,21 @@ export default function AdminUserManagement() {
       return prior && prior.role !== e.role;
     });
 
-    await Promise.all([
+    const results = await Promise.all([
       ...removed.map(r => supabase.from('committee_members').delete().eq('committee_id', r.committee_id).eq('user_id', editingUserId)),
       ...added.map(a => supabase.from('committee_members').insert({ committee_id: a.committeeId, user_id: editingUserId, role: a.role })),
       ...changed.map(c => supabase.from('committee_members').update({ role: c.role }).eq('committee_id', c.committeeId).eq('user_id', editingUserId)),
     ]);
+    if (results.some(r => r.error)) hadError = true;
 
     cancelEdit();
     load();
+
+    if (hadError) {
+      toast.error('Some changes could not be saved.');
+    } else {
+      toast.success('Changes saved');
+    }
   };
 
   const getRoleColor = (role: SystemRole) => {

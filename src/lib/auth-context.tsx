@@ -85,6 +85,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [supabase, loadProfileAndMemberships]);
 
+  // Live role sync: if an admin changes this user's system_role or committee
+  // memberships while they're active, permissions update everywhere (nav,
+  // committee access, etc.) without needing a refresh.
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase
+      .channel(`profile-roles-${user.id}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${user.id}` }, () => loadProfileAndMemberships(user.id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'committee_members', filter: `user_id=eq.${user.id}` }, () => loadProfileAndMemberships(user.id))
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, supabase, loadProfileAndMemberships]);
+
   const isSuperAdmin = profile?.system_role === 'super_admin';
   const isAdmin = isSuperAdmin || profile?.system_role === 'admin';
 

@@ -3,7 +3,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { Plus, Trash2, Loader2, ArrowLeft, Printer, Download, Settings2, X } from 'lucide-react';
+import { Plus, Trash2, Loader2, ArrowLeft, Printer, Download, Settings2, X, Pencil, Check } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import type { ColumnType } from '@/lib/list-templates';
@@ -50,6 +51,9 @@ export default function ListDetail() {
   const [isLoading, setIsLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [showColumnManager, setShowColumnManager] = useState(false);
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [draftCells, setDraftCells] = useState<Record<string, unknown> | null>(null);
+  const [isSavingRow, setIsSavingRow] = useState(false);
 
   // New-column form (heads only)
   const [newColLabel, setNewColLabel] = useState('');
@@ -99,19 +103,47 @@ export default function ListDetail() {
       .insert({ list_id: listId, cells: {}, position, created_by: profile?.id })
       .select('id, cells, position')
       .single();
-    if (!error && data) setRows(prev => [...prev, data as Row]);
+    if (!error && data) {
+      setRows(prev => [...prev, data as Row]);
+    } else {
+      toast.error('Could not add row.');
+    }
   };
 
-  const updateCell = async (rowId: string, columnId: string, value: unknown) => {
-    setRows(prev => prev.map(r => (r.id === rowId ? { ...r, cells: { ...r.cells, [columnId]: value } } : r)));
-    const row = rows.find(r => r.id === rowId);
-    const nextCells = { ...(row?.cells ?? {}), [columnId]: value };
-    await supabase.from('committee_list_rows').update({ cells: nextCells }).eq('id', rowId);
+  // Row editing: nothing writes to the DB until Save is clicked. Edits are
+  // held in `draftCells` while `editingRowId` marks which row is open.
+  const startEditRow = (row: Row) => {
+    setEditingRowId(row.id);
+    setDraftCells({ ...row.cells });
+  };
+
+  const cancelEditRow = () => {
+    setEditingRowId(null);
+    setDraftCells(null);
+  };
+
+  const updateDraftCell = (columnId: string, value: unknown) => {
+    setDraftCells(prev => (prev ? { ...prev, [columnId]: value } : prev));
+  };
+
+  const saveRowEdit = async () => {
+    if (!editingRowId || !draftCells) return;
+    setIsSavingRow(true);
+    const { error } = await supabase.from('committee_list_rows').update({ cells: draftCells }).eq('id', editingRowId);
+    setIsSavingRow(false);
+    if (error) {
+      toast.error('That change was not saved.');
+    } else {
+      setRows(prev => prev.map(r => (r.id === editingRowId ? { ...r, cells: draftCells } : r)));
+      toast.success('Saved');
+    }
+    cancelEditRow();
   };
 
   const deleteRow = async (rowId: string) => {
     setRows(prev => prev.filter(r => r.id !== rowId));
-    await supabase.from('committee_list_rows').delete().eq('id', rowId);
+    const { error } = await supabase.from('committee_list_rows').delete().eq('id', rowId);
+    if (error) toast.error('Could not delete row.');
   };
 
   // --- Columns (heads/admins only) ---
@@ -130,12 +162,16 @@ export default function ListDetail() {
       setNewColLabel('');
       setNewColType('text');
       setNewColOptions('');
+      toast.success('Column added');
+    } else {
+      toast.error('Could not add column.');
     }
   };
 
   const deleteColumn = async (columnId: string) => {
     setColumns(prev => prev.filter(c => c.id !== columnId));
-    await supabase.from('committee_list_columns').delete().eq('id', columnId);
+    const { error } = await supabase.from('committee_list_columns').delete().eq('id', columnId);
+    if (error) toast.error('Could not delete column.');
   };
 
   const exportCsv = () => {
@@ -158,29 +194,43 @@ export default function ListDetail() {
     URL.revokeObjectURL(url);
   };
 
-  const renderCell = (row: Row, col: Column) => {
+  // Read-only display of a cell's value (used outside edit mode).
+  const renderCellValue = (row: Row, col: Column) => {
     const value = row.cells[col.id];
-    const base = 'w-full px-2 py-1.5 text-sm bg-transparent focus:outline-none focus:bg-indigo-50 rounded';
+    if (col.type === 'checkbox') {
+      return <input type="checkbox" checked={value === true} disabled className="w-4 h-4 rounded" />;
+    }
+    const display = value === undefined || value === null ? '' : String(value);
+    if (col.type === 'link' && display) {
+      return <a href={display} target="_blank" rel="noreferrer" className="px-2 py-1.5 text-sm text-indigo-600 hover:underline block truncate">{display}</a>;
+    }
+    return <p className="px-2 py-1.5 text-sm text-gray-700 truncate">{display || '—'}</p>;
+  };
+
+  // Editable cell — reads from and writes to `draftCells`, not the row itself.
+  const renderCellEditor = (col: Column) => {
+    const value = draftCells?.[col.id];
+    const base = 'w-full px-2 py-1.5 text-sm bg-white border border-indigo-300 rounded focus:outline-none focus:border-indigo-500';
     switch (col.type) {
       case 'checkbox':
         return (
-          <input type="checkbox" checked={value === true} onChange={e => updateCell(row.id, col.id, e.target.checked)} className="w-4 h-4 rounded" />
+          <input type="checkbox" checked={value === true} onChange={e => updateDraftCell(col.id, e.target.checked)} className="w-4 h-4 rounded" />
         );
       case 'number':
-        return <input type="number" value={value === undefined || value === null ? '' : String(value)} onChange={e => updateCell(row.id, col.id, e.target.value)} className={base} />;
+        return <input type="number" value={value === undefined || value === null ? '' : String(value)} onChange={e => updateDraftCell(col.id, e.target.value)} className={base} />;
       case 'date':
-        return <input type="date" value={typeof value === 'string' ? value : ''} onChange={e => updateCell(row.id, col.id, e.target.value)} className={base} />;
+        return <input type="date" value={typeof value === 'string' ? value : ''} onChange={e => updateDraftCell(col.id, e.target.value)} className={base} />;
       case 'select':
         return (
-          <select value={typeof value === 'string' ? value : ''} onChange={e => updateCell(row.id, col.id, e.target.value)} className={base}>
+          <select value={typeof value === 'string' ? value : ''} onChange={e => updateDraftCell(col.id, e.target.value)} className={base}>
             <option value="">—</option>
             {col.options.map(o => <option key={o} value={o}>{o}</option>)}
           </select>
         );
       case 'link':
-        return <input type="text" value={typeof value === 'string' ? value : ''} onChange={e => updateCell(row.id, col.id, e.target.value)} placeholder="https://…" className={base} />;
+        return <input type="text" value={typeof value === 'string' ? value : ''} onChange={e => updateDraftCell(col.id, e.target.value)} placeholder="https://…" className={base} />;
       default:
-        return <input type="text" value={typeof value === 'string' ? value : ''} onChange={e => updateCell(row.id, col.id, e.target.value)} className={base} />;
+        return <input type="text" value={typeof value === 'string' ? value : ''} onChange={e => updateDraftCell(col.id, e.target.value)} className={base} />;
     }
   };
 
@@ -291,21 +341,40 @@ export default function ListDetail() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map(row => (
-                  <tr key={row.id} className="border-b hover:bg-gray-50/50 print:hover:bg-white">
-                    {columns.map(col => (
-                      <td key={col.id} className="px-1 py-0.5 border print:border-gray-300 print:px-2 print:py-1 align-top">
-                        <span className="hidden print:inline text-sm">{renderPrintValue(row, col)}</span>
-                        <span className="print:hidden">{renderCell(row, col)}</span>
+                {rows.map(row => {
+                  const isEditing = editingRowId === row.id;
+                  return (
+                    <tr key={row.id} className={`border-b print:hover:bg-white ${isEditing ? 'bg-indigo-50/60' : 'hover:bg-gray-50/50'}`}>
+                      {columns.map(col => (
+                        <td key={col.id} className="px-1 py-0.5 border print:border-gray-300 print:px-2 print:py-1 align-top">
+                          <span className="hidden print:inline text-sm">{renderPrintValue(row, col)}</span>
+                          <span className="print:hidden">{isEditing ? renderCellEditor(col) : renderCellValue(row, col)}</span>
+                        </td>
+                      ))}
+                      <td className="text-center print:hidden whitespace-nowrap">
+                        {isEditing ? (
+                          <div className="flex items-center justify-center gap-1">
+                            <button onClick={saveRowEdit} disabled={isSavingRow} title="Save" className="p-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">
+                              {isSavingRow ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                            </button>
+                            <button onClick={cancelEditRow} disabled={isSavingRow} title="Cancel" className="p-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 disabled:opacity-50">
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1">
+                            <button onClick={() => startEditRow(row)} className="p-1 text-gray-300 hover:text-indigo-500 rounded transition-colors" title="Edit row">
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button onClick={() => deleteRow(row.id)} className="p-1 text-gray-300 hover:text-red-500 rounded transition-colors" title="Delete row">
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        )}
                       </td>
-                    ))}
-                    <td className="text-center print:hidden">
-                      <button onClick={() => deleteRow(row.id)} className="p-1 text-gray-300 hover:text-red-500 rounded transition-colors" title="Delete row">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                    </tr>
+                  );
+                })}
                 {rows.length === 0 && (
                   <tr><td colSpan={columns.length + 1} className="px-3 py-8 text-center text-sm text-gray-400">No rows yet. Add one below.</td></tr>
                 )}

@@ -3,7 +3,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { Plus, Upload, MessageSquare, Trash2, X, Send, Loader2, AlertCircle, Users2, Search, UserPlus, Table2 } from 'lucide-react';
+import { Plus, Upload, MessageSquare, Trash2, X, Send, Loader2, AlertCircle, Users2, Search, UserPlus, Table2, Pencil, Check } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import type { Committee, Profile, CommitteeRole } from '@/lib/rbac';
@@ -114,6 +115,9 @@ export default function CommitteeTaskBoard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [showAddTask, setShowAddTask] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [draftTask, setDraftTask] = useState<Task | null>(null);
+  const [isSavingTask, setIsSavingTask] = useState(false);
 
   // Task board toolbar: search / filters / sort / grouping.
   const [taskSearch, setTaskSearch] = useState('');
@@ -231,14 +235,58 @@ export default function CommitteeTaskBoard() {
     return members.find(m => m.id === userId)?.full_name || members.find(m => m.id === userId)?.email || 'Unknown';
   };
 
-  const updateTask = async (id: string, field: 'title' | 'assigneeId' | 'status' | 'priority' | 'dueDate', value: string) => {
-    setTasks(prev => prev.map(t => (t.id === id ? { ...t, [field]: value } : t)));
-    const dbField = { title: 'title', assigneeId: 'assignee_id', status: 'status', priority: 'priority', dueDate: 'due_date' }[field];
-    const { error } = await supabase.from('tasks').update({ [dbField]: value || null }).eq('id', id);
-    if (error) {
-      setLoadError('That change was not saved — you may not have permission to edit this field.');
-      loadEverything();
+  // Row editing: nothing writes to the DB until Save is clicked. Edits are
+  // held in `draftTask` while `editingTaskId` marks which row is open.
+  const startEditTask = (task: Task) => {
+    setEditingTaskId(task.id);
+    setDraftTask({ ...task });
+  };
+
+  const cancelEditTask = () => {
+    setEditingTaskId(null);
+    setDraftTask(null);
+  };
+
+  const updateDraftField = (field: keyof Task, value: string) => {
+    setDraftTask(prev => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const saveTaskEdit = async () => {
+    if (!draftTask) return;
+    const original = tasks.find(t => t.id === draftTask.id);
+    if (!original) return;
+
+    const fieldToDb: Record<'title' | 'assigneeId' | 'status' | 'priority' | 'dueDate', string> = {
+      title: 'title',
+      assigneeId: 'assignee_id',
+      status: 'status',
+      priority: 'priority',
+      dueDate: 'due_date',
+    };
+    const changes: Record<string, string | null> = {};
+    (Object.keys(fieldToDb) as Array<keyof typeof fieldToDb>).forEach(field => {
+      if (draftTask[field] !== original[field]) {
+        changes[fieldToDb[field]] = draftTask[field] || null;
+      }
+    });
+
+    if (Object.keys(changes).length === 0) {
+      cancelEditTask();
+      return;
     }
+
+    setIsSavingTask(true);
+    const { error } = await supabase.from('tasks').update(changes).eq('id', draftTask.id);
+    setIsSavingTask(false);
+
+    if (error) {
+      toast.error('That change was not saved — you may not have permission to edit this field.');
+      loadEverything();
+    } else {
+      setTasks(prev => prev.map(t => (t.id === draftTask.id ? draftTask : t)));
+      toast.success('Saved');
+    }
+    cancelEditTask();
   };
 
   const addTask = async () => {
@@ -252,17 +300,27 @@ export default function CommitteeTaskBoard() {
       setTasks(prev => [...prev, mapTaskRow(data)]);
       setNewTaskTitle('');
       setShowAddTask(false);
+      toast.success('Task added');
+    } else {
+      toast.error('Could not add that task.');
     }
   };
 
   const deleteTask = async (id: string) => {
     setTasks(prev => prev.filter(t => t.id !== id));
-    await supabase.from('tasks').delete().eq('id', id);
+    const { error } = await supabase.from('tasks').delete().eq('id', id);
+    if (error) {
+      toast.error('Could not delete that task.');
+      loadEverything();
+    } else {
+      toast.success('Task deleted');
+    }
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !profile) return;
     setIsUploading(true);
+    let failed = 0;
     for (const file of Array.from(e.target.files)) {
       const storagePath = `${committeeId}/${Date.now()}-${file.name}`;
       const { error: uploadError } = await supabase.storage.from('committee-files').upload(storagePath, file);
@@ -274,11 +332,18 @@ export default function CommitteeTaskBoard() {
           file_name: file.name,
           file_size_bytes: file.size,
         });
+      } else {
+        failed++;
       }
     }
     setIsUploading(false);
     e.target.value = '';
     loadEverything();
+    if (failed > 0) {
+      toast.error(`${failed} file${failed !== 1 ? 's' : ''} failed to upload.`);
+    } else {
+      toast.success('Uploaded');
+    }
   };
 
   const downloadFile = async (f: CommitteeFile) => {
@@ -288,34 +353,44 @@ export default function CommitteeTaskBoard() {
 
   const deleteFile = async (f: CommitteeFile) => {
     setFiles(prev => prev.filter(x => x.id !== f.id));
-    await supabase.storage.from('committee-files').remove([f.storagePath]);
-    await supabase.from('committee_files').delete().eq('id', f.id);
+    const { error: removeError } = await supabase.storage.from('committee-files').remove([f.storagePath]);
+    const { error: deleteError } = await supabase.from('committee_files').delete().eq('id', f.id);
+    if (removeError || deleteError) {
+      toast.error('Could not delete that file.');
+      loadEverything();
+    } else {
+      toast.success('File deleted');
+    }
   };
 
   const sendMessage = async () => {
     if (!newMessage.trim() || !profile) return;
     const body = newMessage.trim();
     setNewMessage('');
-    await supabase.from('committee_messages').insert({ committee_id: committeeId, user_id: profile.id, body });
+    const { error } = await supabase.from('committee_messages').insert({ committee_id: committeeId, user_id: profile.id, body });
+    if (error) toast.error('Message failed to send.');
     loadEverything();
   };
 
   const addMember = async (userId: string, role: CommitteeRole = 'volunteer') => {
     const { error } = await supabase.from('committee_members').insert({ committee_id: committeeId, user_id: userId, role });
     if (error) {
-      setLoadError('Could not add that person — you may not have permission.');
+      toast.error('Could not add that person — you may not have permission.');
       return;
     }
     setMemberSearch('');
     loadEverything();
+    toast.success('Member added');
   };
 
   const changeMemberRole = async (userId: string, role: CommitteeRole) => {
     setMemberRoles(prev => ({ ...prev, [userId]: role }));
     const { error } = await supabase.from('committee_members').update({ role }).eq('committee_id', committeeId).eq('user_id', userId);
     if (error) {
-      setLoadError('Could not change that role.');
+      toast.error('Could not change that role.');
       loadEverything();
+    } else {
+      toast.success('Role updated');
     }
   };
 
@@ -323,7 +398,9 @@ export default function CommitteeTaskBoard() {
     setMembers(prev => prev.filter(m => m.id !== userId));
     const { error } = await supabase.from('committee_members').delete().eq('committee_id', committeeId).eq('user_id', userId);
     if (error) {
-      setLoadError('Could not remove that person.');
+      toast.error('Could not remove that person.');
+    } else {
+      toast.success('Member removed');
     }
     loadEverything();
   };
@@ -383,85 +460,140 @@ export default function CommitteeTaskBoard() {
     .filter(g => g.items.length > 0);
 
   // One task row, responsive: 12-col grid on desktop, stacked card on mobile.
+  // Read-only by default. Clicking the pencil puts the row into edit mode —
+  // edits are held in `draftTask` and nothing writes to the DB until Save.
   const renderTaskRow = (task: Task) => {
     const isOwnTask = task.assigneeId === profile?.id;
     const canEditFull = isHead;
     const canEditStatus = isHead || isOwnTask;
+    const canEditAny = canEditFull || canEditStatus;
+    const isEditing = editingTaskId === task.id;
     const due = dueState(task.dueDate, task.status);
     const dueClass = due === 'overdue' ? 'text-red-600 font-semibold' : due === 'soon' ? 'text-orange-600 font-medium' : 'text-gray-500';
+
+    if (isEditing && draftTask) {
+      const dueDraft = dueState(draftTask.dueDate, draftTask.status);
+      return (
+        <div key={task.id} className="flex flex-col gap-2 md:grid md:grid-cols-12 md:gap-2 px-4 py-3 bg-indigo-50/60 md:items-center">
+          {/* Title */}
+          <div className="md:col-span-4">
+            {canEditFull ? (
+              <input type="text" value={draftTask.title} onChange={e => updateDraftField('title', e.target.value)} className="w-full px-2 py-1 border border-indigo-300 rounded focus:outline-none focus:border-indigo-500 text-sm font-medium md:font-normal" />
+            ) : (
+              <p className="px-2 py-1 text-sm font-medium md:font-normal text-gray-900">{task.title}</p>
+            )}
+          </div>
+          {/* Assignee */}
+          <div className="md:col-span-2 flex items-center gap-2">
+            <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Assignee</span>
+            {canEditFull ? (
+              <select value={draftTask.assigneeId ?? ''} onChange={e => updateDraftField('assigneeId', e.target.value)} className="w-full px-2 py-1 border border-indigo-300 rounded text-sm focus:outline-none focus:border-indigo-500">
+                <option value="">Unassigned</option>
+                {members.map(m => (
+                  <option key={m.id} value={m.id}>{m.full_name || m.email}</option>
+                ))}
+              </select>
+            ) : (
+              <p className="px-2 py-1 text-sm text-gray-600">{memberName(task.assigneeId)}</p>
+            )}
+          </div>
+          {/* Status */}
+          <div className="md:col-span-2 flex items-center gap-2">
+            <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Status</span>
+            {canEditStatus ? (
+              <select
+                value={draftTask.status}
+                onChange={e => updateDraftField('status', e.target.value)}
+                className={`w-full px-2 py-1 border border-indigo-300 rounded text-xs font-medium ${statusStyle[draftTask.status] ?? ''}`}
+              >
+                <option value="todo">To Do</option>
+                <option value="in_progress">In Progress</option>
+                <option value="review">Review</option>
+                <option value="done">Done</option>
+                <option value="blocked">Blocked</option>
+              </select>
+            ) : (
+              <span className={`px-2 py-1 rounded text-xs font-medium ${statusStyle[task.status] ?? ''}`}>{STATUS_LABEL[task.status]}</span>
+            )}
+          </div>
+          {/* Priority */}
+          <div className="md:col-span-1 flex items-center gap-2">
+            <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Priority</span>
+            {canEditFull ? (
+              <select value={draftTask.priority} onChange={e => updateDraftField('priority', e.target.value)} className={`w-full px-1 py-1 border border-indigo-300 rounded text-xs font-medium ${priorityStyle[draftTask.priority] ?? ''}`}>
+                <option value="low">Low</option>
+                <option value="medium">Med</option>
+                <option value="high">High</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            ) : (
+              <span className={`inline-block px-1.5 py-1 rounded text-xs font-medium ${priorityStyle[task.priority] ?? ''}`}>{task.priority}</span>
+            )}
+          </div>
+          {/* Due date */}
+          <div className="md:col-span-2 flex items-center gap-2">
+            <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Due</span>
+            {canEditFull ? (
+              <div className="flex items-center gap-1 w-full">
+                <input type="date" value={draftTask.dueDate} onChange={e => updateDraftField('dueDate', e.target.value)} className={`w-full px-2 py-1 border rounded text-sm focus:outline-none focus:border-indigo-500 ${dueDraft === 'overdue' ? 'border-red-300 text-red-600' : 'border-indigo-300'}`} />
+                {dueDraft === 'overdue' && <span title="Overdue"><AlertCircle className="h-4 w-4 text-red-500 shrink-0" /></span>}
+              </div>
+            ) : (
+              <p className={`px-2 py-1 text-sm ${dueClass}`}>
+                {task.dueDate || '—'}{due === 'overdue' && ' · overdue'}{due === 'soon' && ' · soon'}
+              </p>
+            )}
+          </div>
+          {/* Save / Cancel */}
+          <div className="md:col-span-1 flex items-center justify-end gap-1">
+            <button onClick={saveTaskEdit} disabled={isSavingTask} title="Save" className="p-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">
+              {isSavingTask ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+            </button>
+            <button onClick={cancelEditTask} disabled={isSavingTask} title="Cancel" className="p-1.5 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 disabled:opacity-50">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div key={task.id} className="flex flex-col gap-2 md:grid md:grid-cols-12 md:gap-2 px-4 py-3 hover:bg-gray-50 md:items-center">
         {/* Title */}
         <div className="md:col-span-4">
-          {canEditFull ? (
-            <input type="text" value={task.title} onChange={e => updateTask(task.id, 'title', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-200 rounded focus:outline-none focus:border-indigo-400 text-sm font-medium md:font-normal" />
-          ) : (
-            <p className="px-2 py-1 text-sm font-medium md:font-normal text-gray-900">{task.title}</p>
-          )}
+          <p className="px-2 py-1 text-sm font-medium md:font-normal text-gray-900">{task.title}</p>
         </div>
         {/* Assignee */}
         <div className="md:col-span-2 flex items-center gap-2">
           <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Assignee</span>
-          {canEditFull ? (
-            <select value={task.assigneeId ?? ''} onChange={e => updateTask(task.id, 'assigneeId', e.target.value)} className="w-full px-2 py-1 border border-gray-200 rounded text-sm focus:outline-none focus:border-indigo-400">
-              <option value="">Unassigned</option>
-              {members.map(m => (
-                <option key={m.id} value={m.id}>{m.full_name || m.email}</option>
-              ))}
-            </select>
-          ) : (
-            <p className="px-2 py-1 text-sm text-gray-600">{memberName(task.assigneeId)}</p>
-          )}
+          <p className="px-2 py-1 text-sm text-gray-600">{memberName(task.assigneeId)}</p>
         </div>
         {/* Status */}
         <div className="md:col-span-2 flex items-center gap-2">
           <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Status</span>
-          <select
-            value={task.status}
-            onChange={e => updateTask(task.id, 'status', e.target.value)}
-            disabled={!canEditStatus}
-            className={`w-full px-2 py-1 border rounded text-xs font-medium disabled:opacity-60 ${statusStyle[task.status] ?? ''}`}
-          >
-            <option value="todo">To Do</option>
-            <option value="in_progress">In Progress</option>
-            <option value="review">Review</option>
-            <option value="done">Done</option>
-            <option value="blocked">Blocked</option>
-          </select>
+          <span className={`px-2 py-1 rounded text-xs font-medium ${statusStyle[task.status] ?? ''}`}>{STATUS_LABEL[task.status]}</span>
         </div>
         {/* Priority */}
         <div className="md:col-span-1 flex items-center gap-2">
           <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Priority</span>
-          {canEditFull ? (
-            <select value={task.priority} onChange={e => updateTask(task.id, 'priority', e.target.value)} className={`w-full px-1 py-1 border rounded text-xs font-medium ${priorityStyle[task.priority] ?? ''}`}>
-              <option value="low">Low</option>
-              <option value="medium">Med</option>
-              <option value="high">High</option>
-              <option value="urgent">Urgent</option>
-            </select>
-          ) : (
-            <span className={`inline-block px-1.5 py-1 rounded text-xs font-medium ${priorityStyle[task.priority] ?? ''}`}>{task.priority}</span>
-          )}
+          <span className={`inline-block px-1.5 py-1 rounded text-xs font-medium ${priorityStyle[task.priority] ?? ''}`}>{task.priority}</span>
         </div>
         {/* Due date */}
         <div className="md:col-span-2 flex items-center gap-2">
           <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Due</span>
-          {canEditFull ? (
-            <div className="flex items-center gap-1 w-full">
-              <input type="date" value={task.dueDate} onChange={e => updateTask(task.id, 'dueDate', e.target.value)} className={`w-full px-2 py-1 border rounded text-sm focus:outline-none focus:border-indigo-400 ${due === 'overdue' ? 'border-red-300 text-red-600' : 'border-gray-200'}`} />
-              {due === 'overdue' && <span title="Overdue"><AlertCircle className="h-4 w-4 text-red-500 shrink-0" /></span>}
-            </div>
-          ) : (
-            <p className={`px-2 py-1 text-sm ${dueClass}`}>
-              {task.dueDate || '—'}{due === 'overdue' && ' · overdue'}{due === 'soon' && ' · soon'}
-            </p>
-          )}
+          <p className={`px-2 py-1 text-sm ${dueClass}`}>
+            {task.dueDate || '—'}{due === 'overdue' && ' · overdue'}{due === 'soon' && ' · soon'}
+          </p>
         </div>
-        {/* Delete */}
-        <div className="md:col-span-1 flex md:justify-center">
+        {/* Edit / Delete */}
+        <div className="md:col-span-1 flex items-center md:justify-end gap-1">
+          {canEditAny && (
+            <button onClick={() => startEditTask(task)} title="Edit" className="p-1 hover:bg-indigo-50 rounded text-gray-300 hover:text-indigo-500 transition-colors">
+              <Pencil className="h-4 w-4" />
+            </button>
+          )}
           {canEditFull && (
-            <button onClick={() => deleteTask(task.id)} className="p-1 hover:bg-red-50 rounded text-gray-300 hover:text-red-500 transition-colors">
+            <button onClick={() => deleteTask(task.id)} title="Delete" className="p-1 hover:bg-red-50 rounded text-gray-300 hover:text-red-500 transition-colors">
               <Trash2 className="h-4 w-4" />
             </button>
           )}

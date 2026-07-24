@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Plus, Table2, Trash2, Loader2, ArrowLeft, X } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import type { Committee } from '@/lib/rbac';
@@ -72,6 +73,7 @@ export default function CommitteeListsIndex() {
 
     if (error || !created) {
       setCreating(false);
+      toast.error('Could not create that list.');
       return;
     }
 
@@ -94,7 +96,12 @@ export default function CommitteeListsIndex() {
 
   const deleteList = async (id: string) => {
     setLists(prev => prev.filter(l => l.id !== id));
-    await supabase.from('committee_lists').delete().eq('id', id);
+    const { error } = await supabase.from('committee_lists').delete().eq('id', id);
+    if (error) {
+      toast.error('Could not delete that list.');
+    } else {
+      toast.success('List deleted');
+    }
     load();
   };
 

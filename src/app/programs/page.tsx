@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { Clock, MapPin, Mic, Coffee, Users, Trophy, Plus, Trash2, GripVertical, Pencil, Check, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 
@@ -98,23 +99,31 @@ export default function ProgramsPage() {
     const usedNumbers = new Set(days.map(d => d.dayNumber));
     let nextNumber = 1;
     while (usedNumbers.has(nextNumber)) nextNumber++;
-    await supabase.from('program_days').insert({ day_number: nextNumber });
+    const { error } = await supabase.from('program_days').insert({ day_number: nextNumber });
     load();
+    if (error) toast.error('Could not add day.');
   };
 
   const deleteDay = async (dayId: string) => {
     setDays(prev => prev.filter(d => d.id !== dayId));
-    await supabase.from('program_days').delete().eq('id', dayId);
+    const { error } = await supabase.from('program_days').delete().eq('id', dayId);
+    if (error) toast.error('Could not delete that day.');
   };
 
   const updateDayDate = async (dayId: string, date: string) => {
     setDays(prev => prev.map(d => (d.id === dayId ? { ...d, date } : d)));
-    await supabase.from('program_days').update({ date: date || null }).eq('id', dayId);
+    const { error } = await supabase.from('program_days').update({ date: date || null }).eq('id', dayId);
+    if (error) {
+      toast.error('That date was not saved.');
+    } else {
+      toast.success('Saved');
+    }
   };
 
   const deleteSession = async (dayId: string, sessionId: string) => {
     setDays(prev => prev.map(d => (d.id === dayId ? { ...d, sessions: d.sessions.filter(s => s.id !== sessionId) } : d)));
-    await supabase.from('program_sessions').delete().eq('id', sessionId);
+    const { error } = await supabase.from('program_sessions').delete().eq('id', sessionId);
+    if (error) toast.error('Could not delete that session.');
   };
 
   const startAddSession = (dayId: string) => {
@@ -126,7 +135,7 @@ export default function ProgramsPage() {
     if (addingToDay === null || !draft.title.trim() || !draft.time.trim()) return;
     const day = days.find(d => d.id === addingToDay);
     const nextOrderIndex = day ? day.sessions.length : 0;
-    await supabase.from('program_sessions').insert({
+    const { error } = await supabase.from('program_sessions').insert({
       program_day_id: addingToDay,
       order_index: nextOrderIndex,
       time_label: draft.time.trim(),
@@ -137,6 +146,11 @@ export default function ProgramsPage() {
     });
     setAddingToDay(null);
     load();
+    if (error) {
+      toast.error('Could not add that session.');
+    } else {
+      toast.success('Session added');
+    }
   };
 
   const handleDrop = async (dayId: string, targetSessionId: string) => {
@@ -153,7 +167,11 @@ export default function ProgramsPage() {
     setDays(prev => prev.map(d => (d.id === dayId ? { ...d, sessions } : d)));
     setDraggedSessionId(null);
 
-    await Promise.all(sessions.map((s, idx) => supabase.from('program_sessions').update({ order_index: idx }).eq('id', s.id)));
+    const results = await Promise.all(sessions.map((s, idx) => supabase.from('program_sessions').update({ order_index: idx }).eq('id', s.id)));
+    if (results.some(r => r.error)) {
+      toast.error('Could not save the new order.');
+      load();
+    }
   };
 
   const sortedDays = [...days].sort((a, b) => a.dayNumber - b.dayNumber);

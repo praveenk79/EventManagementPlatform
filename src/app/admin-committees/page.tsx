@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Plus, Edit2, Archive, Users, AlertCircle, Save, Trash2, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import type { Committee, Profile } from '@/lib/rbac';
@@ -83,18 +84,22 @@ export default function AdminCommitteeManagement() {
       .insert({ slug: slugify(formData.name), name: formData.name.trim(), description: formData.description.trim(), created_by: profile.id })
       .select()
       .single();
-    if (error || !created) return;
+    if (error || !created) {
+      toast.error('Could not create that committee.');
+      return;
+    }
 
     if (formData.headUserId) {
       await supabase.from('committee_members').insert({ committee_id: created.id, user_id: formData.headUserId, role: 'head' });
     }
     resetForm();
     load();
+    toast.success('Committee created');
   };
 
   const updateCommittee = async () => {
     if (!formData.name.trim() || !editingId) return;
-    await supabase
+    const { error } = await supabase
       .from('committees')
       .update({ name: formData.name.trim(), description: formData.description.trim() })
       .eq('id', editingId);
@@ -110,16 +115,31 @@ export default function AdminCommitteeManagement() {
     }
     resetForm();
     load();
+    if (error) {
+      toast.error('Could not save all changes.');
+    } else {
+      toast.success('Committee updated');
+    }
   };
 
   const deleteCommittee = async (id: string) => {
-    await supabase.from('committees').delete().eq('id', id);
+    const { error } = await supabase.from('committees').delete().eq('id', id);
     load();
+    if (error) {
+      toast.error('Could not delete that committee.');
+    } else {
+      toast.success('Committee deleted');
+    }
   };
 
   const archiveCommittee = async (id: string, archived: boolean) => {
-    await supabase.from('committees').update({ archived: !archived }).eq('id', id);
+    const { error } = await supabase.from('committees').update({ archived: !archived }).eq('id', id);
     load();
+    if (error) {
+      toast.error('Could not update that committee.');
+    } else {
+      toast.success(archived ? 'Committee unarchived' : 'Committee archived');
+    }
   };
 
   const startEdit = (committee: Committee) => {

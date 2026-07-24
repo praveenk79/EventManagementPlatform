@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
+import { Toaster } from 'sonner';
 import './globals.css';
 import Navigation from '@/components/Navigation';
 import { AuthProvider } from '@/lib/auth-context';
@@ -33,6 +34,7 @@ export default function RootLayout({
         <AuthProvider>
           <Navigation />
           <main>{children}</main>
+          <Toaster position="top-center" richColors closeButton />
         </AuthProvider>
       </body>
     </html>
