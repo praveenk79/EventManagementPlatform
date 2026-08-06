@@ -617,4 +617,18 @@ create policy "Committee members delete own committee files"
     and (select public.is_committee_member((storage.foldername(name))[1]::uuid))
   );
 
+-- Required for upsert/overwrite (e.g. saving an edited spreadsheet back to the
+-- same storage path). Without this, upload({ upsert: true }) returns 403.
+drop policy if exists "Committee members update own committee files" on storage.objects;
+create policy "Committee members update own committee files"
+  on storage.objects for update
+  using (
+    bucket_id = 'committee-files'
+    and (select public.is_committee_member((storage.foldername(name))[1]::uuid))
+  )
+  with check (
+    bucket_id = 'committee-files'
+    and (select public.is_committee_member((storage.foldername(name))[1]::uuid))
+  );
+
 commit;

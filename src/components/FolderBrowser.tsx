@@ -1,10 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Folder as FolderIcon,
   FolderPlus,
   File as FileIcon,
+  FileImage,
+  FileSpreadsheet,
+  FileText,
   Upload,
   Download,
   Trash2,
@@ -14,6 +18,8 @@ import {
   ChevronRight,
   Loader2,
   Share2,
+  Eye,
+  ExternalLink,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
@@ -50,6 +56,27 @@ function formatBytes(bytes: number | null) {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+type FileCategory = 'image' | 'pdf' | 'spreadsheet' | 'document' | 'video' | 'other';
+
+function getFileCategory(fileName: string): FileCategory {
+  const ext = fileName.split('.').pop()?.toLowerCase() ?? '';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
+  if (ext === 'pdf') return 'pdf';
+  if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return 'spreadsheet';
+  if (['doc', 'docx', 'ppt', 'pptx', 'txt', 'rtf', 'odt'].includes(ext)) return 'document';
+  if (['mp4', 'mov', 'avi', 'webm', 'mkv'].includes(ext)) return 'video';
+  return 'other';
+}
+
+function FileCategoryIcon({ fileName, size = 'h-5 w-5', className = '' }: { fileName: string; size?: string; className?: string }) {
+  const cat = getFileCategory(fileName);
+  if (cat === 'image')      return <FileImage       className={`${size} text-emerald-400 ${className}`} />;
+  if (cat === 'pdf')        return <FileText        className={`${size} text-red-400 ${className}`} />;
+  if (cat === 'spreadsheet') return <FileSpreadsheet className={`${size} text-green-500 ${className}`} />;
+  if (cat === 'document')   return <FileText        className={`${size} text-blue-400 ${className}`} />;
+  return <FileIcon className={`${size} text-gray-400 ${className}`} />;
+}
+
 const docTypeLabel = (docType: DocType | null) => DOC_TYPES.find(d => d.value === docType)?.label ?? null;
 
 export default function FolderBrowser({ committeeId, canManage, canUpload }: FolderBrowserProps) {
@@ -84,6 +111,18 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
   const [isUploading, setIsUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [previewFile, setPreviewFile] = useState<BrowserFile | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
+
+  // SheetJS spreadsheet editor state
+  const [workbook, setWorkbook] = useState<XLSX.WorkBook | null>(null);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [activeSheetName, setActiveSheetName] = useState<string>('');
+  const [sheetData, setSheetData] = useState<string[][]>([]);
+  const [isSavingSheet, setIsSavingSheet] = useState(false);
 
   const load = useCallback(async () => {
     if (!committeeId) return;
@@ -170,6 +209,23 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
       supabase.removeChannel(channel);
     };
   }, [committeeId, supabase, load]);
+
+  // Auto-generate signed URLs for image files so thumbnails show immediately.
+  useEffect(() => {
+    const imageFiles = files.filter(f => getFileCategory(f.fileName) === 'image');
+    if (imageFiles.length === 0) return;
+    let cancelled = false;
+    const generate = async () => {
+      const newUrls: Record<string, string> = {};
+      for (const f of imageFiles) {
+        const { data } = await supabase.storage.from('committee-files').createSignedUrl(f.storagePath, 3600);
+        if (data?.signedUrl) newUrls[f.id] = data.signedUrl;
+      }
+      if (!cancelled) setThumbnailUrls(prev => ({ ...prev, ...newUrls }));
+    };
+    generate();
+    return () => { cancelled = true; };
+  }, [files, supabase]);
 
   const vendorNameById = useMemo(() => new Map(vendors.map(v => [v.id, v.name])), [vendors]);
 
@@ -335,6 +391,70 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
   const downloadFile = async (f: BrowserFile) => {
     const { data } = await supabase.storage.from('committee-files').createSignedUrl(f.storagePath, 60);
     if (data?.signedUrl) window.open(data.signedUrl, '_blank');
+  };
+
+  const openPreview = async (f: BrowserFile) => {
+    setPreviewFile(f);
+    setPreviewUrl(null);
+    setWorkbook(null);
+    setSheetNames([]);
+    setSheetData([]);
+    setActiveSheetName('');
+    setIsPreviewLoading(true);
+    const { data } = await supabase.storage.from('committee-files').createSignedUrl(f.storagePath, 300);
+    setPreviewUrl(data?.signedUrl ?? null);
+    if (getFileCategory(f.fileName) === 'spreadsheet' && data?.signedUrl) {
+      try {
+        const response = await fetch(data.signedUrl);
+        const buffer = await response.arrayBuffer();
+        const wb = XLSX.read(buffer, { type: 'array' });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        const firstName = wb.SheetNames[0];
+        setActiveSheetName(firstName);
+        const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[firstName], { header: 1, defval: '' });
+        setSheetData(rows);
+      } catch {
+        // parsing failed — will fall back to Office Online viewer
+      }
+    }
+    setIsPreviewLoading(false);
+  };
+
+  const closePreview = () => {
+    setPreviewFile(null);
+    setPreviewUrl(null);
+    setWorkbook(null);
+    setSheetNames([]);
+    setSheetData([]);
+    setActiveSheetName('');
+  };
+
+  const saveSpreadsheet = async () => {
+    if (!workbook || !previewFile) return;
+    setIsSavingSheet(true);
+    try {
+      workbook.Sheets[activeSheetName] = XLSX.utils.aoa_to_sheet(sheetData);
+      const ext = previewFile.fileName.split('.').pop()?.toLowerCase();
+      const bookType = ext === 'csv' ? 'csv' : 'xlsx';
+      const mimeType = ext === 'csv' ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const output = XLSX.write(workbook, { bookType, type: 'array' }) as ArrayBuffer;
+      const blob = new Blob([output], { type: mimeType });
+      // Use upload with upsert:true — update() requires separate RLS policies
+      const { error } = await supabase.storage
+        .from('committee-files')
+        .upload(previewFile.storagePath, blob, { upsert: true, contentType: mimeType });
+      if (error) {
+        console.error('[saveSpreadsheet] storage error:', error);
+        throw error;
+      }
+      toast.success('Spreadsheet saved!');
+    } catch (err) {
+      console.error('[saveSpreadsheet] caught:', err);
+      toast.error('Failed to save spreadsheet.');
+    } finally {
+      setIsSavingSheet(false);
+    }
   };
 
   const deleteFile = async (f: BrowserFile) => {
@@ -580,25 +700,38 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
             })}
 
             {visibleFiles.map(f => (
-              <div key={f.id} className="flex flex-col gap-2 p-3 hover:bg-gray-50 sm:flex-row sm:items-center sm:justify-between">
-                <button onClick={() => downloadFile(f)} className="flex-1 min-w-0 flex items-center gap-2 text-left">
-                  <FileIcon className="h-5 w-5 text-gray-400 shrink-0" />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate hover:text-indigo-600">{f.fileName}</p>
-                    <p className="text-xs text-gray-400 flex flex-wrap items-center gap-1">
-                      <span>{formatBytes(f.fileSizeBytes)}</span>
-                      <span>· {f.uploadedByName}</span>
-                      <span>· {f.createdAt}</span>
-                      {docTypeLabel(f.docType) && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[11px] font-medium">{docTypeLabel(f.docType)}</span>
-                      )}
-                      {f.vendorId && vendorNameById.get(f.vendorId) && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-[11px] font-medium">{vendorNameById.get(f.vendorId)}</span>
-                      )}
-                    </p>
-                  </div>
-                </button>
-                <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
+              <div
+                key={f.id}
+                className="flex items-center gap-3 p-3 hover:bg-gray-50 cursor-pointer group"
+                onClick={() => openPreview(f)}
+              >
+                {/* Thumbnail / icon */}
+                <div className="h-12 w-12 shrink-0 rounded-lg overflow-hidden bg-gray-100 flex items-center justify-center border border-gray-200">
+                  {getFileCategory(f.fileName) === 'image' && thumbnailUrls[f.id] ? (
+                    <img src={thumbnailUrls[f.id]} alt={f.fileName} className="h-full w-full object-cover" />
+                  ) : getFileCategory(f.fileName) === 'image' ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-gray-300" />
+                  ) : (
+                    <FileCategoryIcon fileName={f.fileName} size="h-6 w-6" />
+                  )}
+                </div>
+                {/* File info */}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate group-hover:text-indigo-600">{f.fileName}</p>
+                  <p className="text-xs text-gray-400 flex flex-wrap items-center gap-1">
+                    <span>{formatBytes(f.fileSizeBytes)}</span>
+                    <span>· {f.uploadedByName}</span>
+                    <span>· {f.createdAt}</span>
+                    {docTypeLabel(f.docType) && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[11px] font-medium">{docTypeLabel(f.docType)}</span>
+                    )}
+                    {f.vendorId && vendorNameById.get(f.vendorId) && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-[11px] font-medium">{vendorNameById.get(f.vendorId)}</span>
+                    )}
+                  </p>
+                </div>
+                {/* Actions — stop propagation so row click doesn't fire */}
+                <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
                   {canManage && (
                     <select
                       value={f.vendorId ?? ''}
@@ -643,6 +776,155 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
           </div>
         )}
       </div>
+
+      {/* File preview modal */}
+      {previewFile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={closePreview}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-7xl max-h-[95vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileCategoryIcon fileName={previewFile.fileName} size="h-4 w-4" className="shrink-0" />
+                <p className="text-sm font-semibold text-gray-900 truncate">{previewFile.fileName}</p>
+                <span className="text-xs text-gray-400 shrink-0">{formatBytes(previewFile.fileSizeBytes)}</span>
+              </div>
+              <div className="flex items-center gap-1 shrink-0 ml-3">
+                {previewUrl && (
+                  <a href={previewUrl} target="_blank" rel="noopener noreferrer" className="p-2 text-gray-400 hover:text-indigo-600 transition-colors" title="Open in new tab">
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                )}
+                {previewUrl && (
+                  <a href={previewUrl} download={previewFile.fileName} className="p-2 text-gray-400 hover:text-indigo-600 transition-colors" title="Download">
+                    <Download className="h-4 w-4" />
+                  </a>
+                )}
+                <button onClick={closePreview} className="p-2 text-gray-400 hover:text-gray-700 transition-colors" title="Close">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto flex items-center justify-center min-h-0 p-4 bg-gray-50">
+              {isPreviewLoading ? (
+                <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+              ) : previewUrl ? (
+                (() => {
+                  const cat = getFileCategory(previewFile.fileName);
+                  if (cat === 'image') {
+                    return <img src={previewUrl} alt={previewFile.fileName} className="max-w-full max-h-[70vh] object-contain rounded-lg shadow" />;
+                  }
+                  if (cat === 'pdf') {
+                    return <iframe src={previewUrl} className="w-full h-[82vh] rounded border-0" title={previewFile.fileName} />;
+                  }
+                  if (cat === 'spreadsheet') {
+                    if (sheetData.length > 0) {
+                      const colCount = Math.max(...sheetData.map(r => r.length));
+                      return (
+                        <div className="w-full h-[82vh] flex flex-col gap-2">
+                          {sheetNames.length > 1 && (
+                            <div className="flex gap-1 overflow-x-auto shrink-0">
+                              {sheetNames.map(name => (
+                                <button
+                                  key={name}
+                                  onClick={() => {
+                                    setActiveSheetName(name);
+                                    const rows = XLSX.utils.sheet_to_json<string[]>(workbook!.Sheets[name], { header: 1, defval: '' });
+                                    setSheetData(rows);
+                                  }}
+                                  className={`px-3 py-1 text-xs rounded border whitespace-nowrap ${
+                                    name === activeSheetName
+                                      ? 'bg-indigo-600 text-white border-indigo-600 font-semibold'
+                                      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex-1 overflow-auto border rounded bg-white">
+                            <table className="text-xs border-collapse">
+                              <tbody>
+                                {sheetData.map((row, ri) => (
+                                  <tr key={ri}>
+                                    {Array.from({ length: Math.max(row.length, colCount) }).map((_, ci) => (
+                                      <td key={ci} className="border border-gray-200 p-0">
+                                        <input
+                                          value={row[ci] ?? ''}
+                                          onChange={e => {
+                                            const val = e.target.value;
+                                            setSheetData(prev =>
+                                              prev.map((r, rIdx) =>
+                                                rIdx === ri
+                                                  ? r.map((c, cIdx) => (cIdx === ci ? val : c))
+                                                  : r
+                                              )
+                                            );
+                                          }}
+                                          className="w-full px-1.5 py-0.5 min-w-[80px] focus:outline-none focus:bg-blue-50 focus:ring-1 focus:ring-inset focus:ring-indigo-300"
+                                        />
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          {canManage && (
+                            <div className="flex justify-end shrink-0">
+                              <button
+                                onClick={saveSpreadsheet}
+                                disabled={isSavingSheet}
+                                className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                              >
+                                {isSavingSheet ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                                Save
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+                    // Fallback if parsing failed
+                    const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(previewUrl ?? '')}`;
+                    return (
+                      <div className="w-full h-[82vh] flex flex-col gap-2">
+                        <iframe src={officeUrl} className="flex-1 rounded border-0" title={previewFile.fileName} />
+                        <p className="text-xs text-gray-400 text-center">Powered by Microsoft Office Online · Read-only view</p>
+                      </div>
+                    );
+                  }
+                  if (cat === 'document') {
+                    const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(previewUrl ?? '')}`;
+                    return (
+                      <div className="w-full h-[82vh] flex flex-col gap-2">
+                        <iframe src={officeUrl} className="flex-1 rounded border-0" title={previewFile.fileName} />
+                        <p className="text-xs text-gray-400 text-center">Powered by Microsoft Office Online · Read-only view</p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="text-center py-10">
+                      <FileCategoryIcon fileName={previewFile.fileName} size="h-16 w-16" className="mx-auto mb-4 opacity-30" />
+                      <p className="text-sm text-gray-500 mb-2">Preview not available for this file type.</p>
+                      <p className="text-xs text-gray-400 mb-6">{previewFile.fileName}</p>
+                      <a
+                        href={previewUrl ?? undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+                      >
+                        <ExternalLink className="h-4 w-4" /> Open in new tab
+                      </a>
+                    </div>
+                  );
+                })()
+              ) : (
+                <p className="text-sm text-gray-400">Could not load preview.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
