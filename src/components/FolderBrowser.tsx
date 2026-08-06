@@ -18,7 +18,6 @@ import {
   ChevronRight,
   Loader2,
   Share2,
-  Eye,
   ExternalLink,
 } from 'lucide-react';
 import { toast } from 'sonner';
