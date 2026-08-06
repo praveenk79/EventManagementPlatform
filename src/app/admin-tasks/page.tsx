@@ -8,6 +8,7 @@ import { createClient } from '@/lib/supabase/client';
 import AdminNav from '@/components/AdminNav';
 import type { Committee, Profile } from '@/lib/rbac';
 import { useRequireAdmin } from '@/lib/use-require-admin';
+import { useEvent } from '@/lib/event-context';
 
 interface TaskRow {
   id: string;
@@ -62,6 +63,7 @@ function isOverdue(due: string | null, status: string): boolean {
 
 function AdminTasksInner() {
   const { allowed, checking } = useRequireAdmin();
+  const { currentEventId } = useEvent();
   const supabase = useMemo(() => createClient(), []);
   const searchParams = useSearchParams();
   const initialFilter = searchParams.get('filter') ?? 'all';
@@ -76,18 +78,41 @@ function AdminTasksInner() {
 
   const load = useCallback(async () => {
     setIsLoading(true);
-    const [{ data: taskRows }, { data: committeeRows }, { data: profileRows }] = await Promise.all([
-      supabase.from('tasks').select('id, title, status, priority, due_date, committee_id, assignee_id'),
-      supabase.from('committees').select('*'),
-      supabase.from('profiles').select('id, email, full_name, avatar_url, system_role'),
-    ]);
-    setTasks((taskRows ?? []) as TaskRow[]);
-    setCommittees(Object.fromEntries((committeeRows ?? []).map(c => [c.id, c])));
-    setProfiles(Object.fromEntries((profileRows ?? []).map(p => [p.id, p])));
-    setIsLoading(false);
-  }, [supabase]);
 
-  useEffect(() => { load(); }, [load]);
+    const profilesPromise = supabase.from('profiles').select('id, email, full_name, avatar_url, system_role');
+
+    if (!currentEventId) {
+      const { data: profileRows } = await profilesPromise;
+      setProfiles(Object.fromEntries((profileRows ?? []).map(p => [p.id, p])));
+      setCommittees({});
+      setTasks([]);
+      setIsLoading(false);
+      return;
+    }
+
+    const [{ data: profileRows }, { data: committeeRows }] = await Promise.all([
+      profilesPromise,
+      supabase.from('committees').select('*').eq('event_id', currentEventId),
+    ]);
+    setProfiles(Object.fromEntries((profileRows ?? []).map(p => [p.id, p])));
+    setCommittees(Object.fromEntries((committeeRows ?? []).map(c => [c.id, c])));
+
+    const committeeIds = (committeeRows ?? []).map(c => c.id);
+    if (committeeIds.length === 0) {
+      setTasks([]);
+      setIsLoading(false);
+      return;
+    }
+
+    const { data: taskRows } = await supabase
+      .from('tasks')
+      .select('id, title, status, priority, due_date, committee_id, assignee_id')
+      .in('committee_id', committeeIds);
+    setTasks((taskRows ?? []) as TaskRow[]);
+    setIsLoading(false);
+  }, [supabase, currentEventId]);
+
+  useEffect(() => { load(); }, [load, currentEventId]);
 
   const filtered = tasks
     .filter(t => {

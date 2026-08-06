@@ -2,8 +2,10 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutGrid, Home, CalendarDays, Users2, ShieldCheck } from 'lucide-react';
+import { useState } from 'react';
+import { LayoutGrid, Home, CalendarDays, Users2, ShieldCheck, FolderOpen, Store, ChevronDown, Check } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
+import { useEvent } from '@/lib/event-context';
 import UserMenu from './UserMenu';
 
 const BASE_NAV_ITEMS = [
@@ -12,7 +14,73 @@ const BASE_NAV_ITEMS = [
 ];
 
 const COMMITTEE_NAV_ITEM = { href: '/committee-portal', label: 'Committees', icon: Users2, match: (p: string) => p.startsWith('/committee') };
+const DOCUMENTS_NAV_ITEM = { href: '/documents', label: 'Documents', icon: FolderOpen, match: (p: string) => p.startsWith('/documents') };
+const VENDORS_NAV_ITEM = { href: '/vendors', label: 'Vendors', icon: Store, match: (p: string) => p.startsWith('/vendors') };
 const ADMIN_NAV_ITEM = { href: '/admin', label: 'Admin', icon: ShieldCheck, match: (p: string) => p.startsWith('/admin') };
+
+function EventSwitcher() {
+  const [isOpen, setIsOpen] = useState(false);
+  const { events, currentEvent, setCurrentEventId, loading: eventsLoading } = useEvent();
+
+  if (eventsLoading) {
+    return <div className="hidden md:block w-32 h-9 rounded-lg bg-gray-100 animate-pulse" />;
+  }
+
+  if (events.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="relative hidden md:block">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-1.5 text-sm font-medium text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors max-w-[200px]"
+      >
+        <span className="truncate">{currentEvent?.name ?? 'Select event'}</span>
+        <ChevronDown className="h-4 w-4 text-gray-400 shrink-0" />
+      </button>
+
+      {isOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-10"
+            onClick={() => setIsOpen(false)}
+          />
+
+          {/* Menu */}
+          <div className="absolute left-0 mt-2 w-64 bg-white rounded-md shadow-lg border border-gray-200 z-20 py-1">
+            {events.map(event => {
+              const selected = event.id === currentEvent?.id;
+              return (
+                <button
+                  key={event.id}
+                  onClick={() => {
+                    setCurrentEventId(event.id);
+                    setIsOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left hover:bg-gray-50 transition-colors ${
+                    selected ? 'text-indigo-700 font-semibold' : 'text-gray-700'
+                  }`}
+                >
+                  <span className="flex items-center gap-2 truncate">
+                    <Check className={`h-4 w-4 shrink-0 ${selected ? 'text-indigo-600' : 'text-transparent'}`} />
+                    <span className="truncate">{event.name}</span>
+                  </span>
+                  {event.status === 'archived' && (
+                    <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded font-medium shrink-0">
+                      Archived
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 export default function Navigation() {
   const pathname = usePathname();
@@ -21,6 +89,8 @@ export default function Navigation() {
   const navItems = [
     ...BASE_NAV_ITEMS,
     ...(isAdmin || committeeRoles.length > 0 ? [COMMITTEE_NAV_ITEM] : []),
+    ...(isAdmin || committeeRoles.length > 0 ? [DOCUMENTS_NAV_ITEM] : []),
+    ...(isAdmin || committeeRoles.length > 0 ? [VENDORS_NAV_ITEM] : []),
     ...(isAdmin ? [ADMIN_NAV_ITEM] : []),
   ];
 
@@ -39,6 +109,11 @@ export default function Navigation() {
                 <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Platform</span>
               </div>
             </Link>
+
+            {/* Event switcher — admins only, hidden below md (mobile has no room up top).
+                EventSwitcher itself handles the loading skeleton and the
+                "no events" (render nothing) cases. */}
+            {isAdmin && <EventSwitcher />}
 
             {/* Navigation Links — desktop only (mobile uses the bottom tab bar) */}
             <div className="hidden md:flex items-center justify-end gap-1 flex-1">
@@ -82,10 +157,15 @@ export default function Navigation() {
       </nav>
 
       {/* Bottom tab bar — mobile only. Fixed to the bottom like a native app,
-          honours the iOS home-bar safe area. Hidden from md up. */}
+          honours the iOS home-bar safe area. Hidden from md up.
+          Up to 6 items now fit (Home, Program, Committees, Documents, Vendors,
+          Admin). Rather than dropping/hiding any of them at 320px, each tab
+          shrinks (min-w-0 + truncate on the label) so the row divides evenly
+          without wrapping or overflowing, and the row itself scrolls
+          horizontally as a fallback if a future addition still doesn't fit. */}
       {user && navItems.length > 0 && (
         <nav className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-white border-t border-gray-200 pb-[env(safe-area-inset-bottom)]">
-          <div className="flex items-stretch justify-around">
+          <div className="flex items-stretch overflow-x-auto">
             {navItems.map(item => {
               const Icon = item.icon;
               const active = item.match(pathname ?? '');
@@ -93,12 +173,12 @@ export default function Navigation() {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`flex flex-col items-center justify-center gap-1 flex-1 min-h-[56px] px-1 pt-2 pb-1.5 text-[11px] font-medium transition-colors ${
+                  className={`flex flex-col items-center justify-center gap-0.5 flex-1 min-w-0 min-h-[56px] px-0.5 pt-2 pb-1.5 text-[10px] font-medium transition-colors ${
                     active ? 'text-indigo-700' : 'text-gray-500 hover:text-gray-800'
                   }`}
                 >
-                  <Icon className="h-[22px] w-[22px]" strokeWidth={active ? 2.5 : 2} />
-                  <span className="leading-none">{item.label}</span>
+                  <Icon className="h-5 w-5 shrink-0" strokeWidth={active ? 2.5 : 2} />
+                  <span className="leading-none truncate max-w-full">{item.label}</span>
                 </Link>
               );
             })}

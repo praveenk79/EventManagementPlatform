@@ -2,10 +2,11 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users2, UserCog, LayoutTemplate } from 'lucide-react';
+import { LayoutDashboard, Users2, UserCog, LayoutTemplate, CalendarRange } from 'lucide-react';
 
 const TABS = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard, match: (p: string) => p === '/admin' },
+  { href: '/admin-events', label: 'Events', icon: CalendarRange, match: (p: string) => p.startsWith('/admin-events') },
   { href: '/admin-committees', label: 'Committees', icon: Users2, match: (p: string) => p.startsWith('/admin-committees') },
   { href: '/admin-users', label: 'Users', icon: UserCog, match: (p: string) => p.startsWith('/admin-users') },
   { href: '/admin-templates', label: 'Templates', icon: LayoutTemplate, match: (p: string) => p.startsWith('/admin-templates') },

@@ -5,6 +5,7 @@ import { Plus, Edit2, Archive, Users, AlertCircle, Save, Trash2, Loader2 } from 
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
+import { useEvent } from '@/lib/event-context';
 import type { Committee, Profile } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
 import { useRequireAdmin } from '@/lib/use-require-admin';
@@ -25,6 +26,7 @@ function slugify(name: string) {
 export default function AdminCommitteeManagement() {
   const { allowed, checking } = useRequireAdmin();
   const { profile } = useAuth();
+  const { currentEventId } = useEvent();
   const supabase = createClient();
 
   const [committees, setCommittees] = useState<Committee[]>([]);
@@ -39,8 +41,17 @@ export default function AdminCommitteeManagement() {
 
   const load = useCallback(async () => {
     setIsLoading(true);
+
+    if (!currentEventId) {
+      setCommittees([]);
+      const { data: profileRows } = await supabase.from('profiles').select('id, email, full_name, avatar_url, system_role');
+      setProfiles(profileRows ?? []);
+      setIsLoading(false);
+      return;
+    }
+
     const [{ data: committeeRows }, { data: profileRows }] = await Promise.all([
-      supabase.from('committees').select('*').order('created_at', { ascending: true }),
+      supabase.from('committees').select('*').eq('event_id', currentEventId).order('created_at', { ascending: true }),
       supabase.from('profiles').select('id, email, full_name, avatar_url, system_role'),
     ]);
     const allCommittees = committeeRows ?? [];
@@ -65,11 +76,11 @@ export default function AdminCommitteeManagement() {
       setHeadByCommittee(heads);
     }
     setIsLoading(false);
-  }, [supabase]);
+  }, [supabase, currentEventId]);
 
   useEffect(() => {
     load();
-  }, [load]);
+  }, [load, currentEventId]);
 
   const resetForm = () => {
     setFormData({ name: '', description: '', headUserId: '' });
@@ -79,12 +90,23 @@ export default function AdminCommitteeManagement() {
 
   const addCommittee = async () => {
     if (!formData.name.trim() || !profile) return;
+    if (!currentEventId) {
+      toast.error('Select an event first.');
+      return;
+    }
     const { data: created, error } = await supabase
       .from('committees')
-      .insert({ slug: slugify(formData.name), name: formData.name.trim(), description: formData.description.trim(), created_by: profile.id })
+      .insert({
+        slug: slugify(formData.name),
+        name: formData.name.trim(),
+        description: formData.description.trim(),
+        created_by: profile.id,
+        event_id: currentEventId,
+      })
       .select()
       .single();
     if (error || !created) {
+      toast.error(error?.message);
       toast.error('Could not create that committee.');
       return;
     }
@@ -170,7 +192,13 @@ export default function AdminCommitteeManagement() {
             <p className="text-gray-600 mt-2">Create, edit, and manage event committees</p>
           </div>
           <button
-            onClick={() => setShowForm(!showForm)}
+            onClick={() => {
+              if (!currentEventId) {
+                toast.error('Select an event first.');
+                return;
+              }
+              setShowForm(!showForm);
+            }}
             className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center gap-2"
           >
             <Plus className="h-5 w-5" /> New Committee

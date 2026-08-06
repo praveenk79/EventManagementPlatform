@@ -4,6 +4,7 @@ import { Toaster } from 'sonner';
 import './globals.css';
 import Navigation from '@/components/Navigation';
 import { AuthProvider } from '@/lib/auth-context';
+import { EventProvider } from '@/lib/event-context';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -32,11 +33,13 @@ export default function RootLayout({
       </head>
       <body className={inter.className}>
         <AuthProvider>
-          <Navigation />
-          {/* Bottom padding on mobile leaves room for the fixed bottom tab bar
-              (plus the iOS home-bar safe area); removed from md up. */}
-          <main className="pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-0">{children}</main>
-          <Toaster position="top-center" richColors closeButton />
+          <EventProvider>
+            <Navigation />
+            {/* Bottom padding on mobile leaves room for the fixed bottom tab bar
+                (plus the iOS home-bar safe area); removed from md up. */}
+            <main className="pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-0">{children}</main>
+            <Toaster position="top-center" richColors closeButton />
+          </EventProvider>
         </AuthProvider>
       </body>
     </html>

@@ -21,6 +21,7 @@ export interface CommitteeMembership {
 
 export interface Committee {
   id: string;
+  event_id: string;
   slug: string;
   name: string;
   description: string;

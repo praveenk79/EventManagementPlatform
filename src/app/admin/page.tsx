@@ -5,6 +5,7 @@ import { Users, CheckSquare, AlertCircle, TrendingUp, Calendar, Plane, Utensils,
 import type { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { useEvent } from '@/lib/event-context';
 import type { Committee, Profile } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
 import { useRequireAdmin } from '@/lib/use-require-admin';
@@ -54,6 +55,7 @@ function statsFromStatuses(statuses: string[]): TaskStats {
 
 export default function AdminDashboard() {
   const { allowed, checking } = useRequireAdmin();
+  const { currentEventId } = useEvent();
   const supabase = useMemo(() => createClient(), []);
   const [committees, setCommittees] = useState<Committee[]>([]);
   const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
@@ -64,7 +66,19 @@ export default function AdminDashboard() {
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
-      const { data: committeeRows } = await supabase.from('committees').select('*').eq('archived', false).order('name');
+
+      if (!currentEventId) {
+        setCommittees([]);
+        setIsLoading(false);
+        return;
+      }
+
+      const { data: committeeRows } = await supabase
+        .from('committees')
+        .select('*')
+        .eq('archived', false)
+        .eq('event_id', currentEventId)
+        .order('name');
       const activeCommittees = committeeRows ?? [];
       setCommittees(activeCommittees);
 
@@ -106,7 +120,7 @@ export default function AdminDashboard() {
       setIsLoading(false);
     };
     load();
-  }, [supabase]);
+  }, [supabase, currentEventId]);
 
   const getCommitteeStats = (id: string): TaskStats => taskStatsByCommittee[id] ?? EMPTY_STATS;
 

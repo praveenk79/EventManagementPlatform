@@ -10,6 +10,7 @@ import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import { pushSupported, isStandalone, notificationPermission, enablePushNotifications } from '@/lib/push';
 import type { Committee, Profile, CommitteeRole } from '@/lib/rbac';
+import FolderBrowser from '@/components/FolderBrowser';
 
 type Task = {
   id: string;
@@ -18,15 +19,10 @@ type Task = {
   status: string;
   priority: string;
   dueDate: string;
-};
-
-type CommitteeFile = {
-  id: string;
-  fileName: string;
-  fileSizeBytes: number | null;
-  storagePath: string;
-  uploadedByName: string;
-  createdAt: string;
+  // Who added the task. Needed to decide edit rights: you may change the
+  // details of a task you created yourself, but only the status of one a head
+  // assigned to you. See supabase/volunteer_create_tasks.sql.
+  createdBy: string | null;
 };
 
 type TaskComment = {
@@ -63,6 +59,7 @@ const mapTaskRow = (row: {
   status: string;
   priority: string;
   due_date: string | null;
+  created_by?: string | null;
 }): Task => ({
   id: row.id,
   title: row.title,
@@ -70,6 +67,7 @@ const mapTaskRow = (row: {
   status: row.status,
   priority: row.priority,
   dueDate: row.due_date ?? '',
+  createdBy: row.created_by ?? null,
 });
 
 const statusStyle: Record<string, string> = {
@@ -86,12 +84,6 @@ const priorityStyle: Record<string, string> = {
   high: 'bg-orange-100 text-orange-800',
   urgent: 'bg-red-100 text-red-800',
 };
-
-function formatBytes(bytes: number | null) {
-  if (!bytes) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KB`;
-}
 
 const PRIORITY_ORDER: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
 
@@ -121,7 +113,7 @@ export default function CommitteeTaskBoard() {
   const params = useParams();
   const committeeId = (params.id as string) ?? '';
   const supabase = useMemo(() => createClient(), []);
-  const { user, profile, isCommitteeHead } = useAuth();
+  const { user, profile, isCommitteeHead, isCommitteeMember } = useAuth();
 
   const [committee, setCommittee] = useState<Committee | null>(null);
   const [members, setMembers] = useState<Profile[]>([]);
@@ -150,8 +142,6 @@ export default function CommitteeTaskBoard() {
 
   const [showFiles, setShowFiles] = useState(false);
   const [showChat, setShowChat] = useState(false);
-  const [files, setFiles] = useState<CommitteeFile[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
   // Auto-scroll anchor: we scroll this into view whenever the thread changes.
@@ -175,6 +165,11 @@ export default function CommitteeTaskBoard() {
   const [postingComment, setPostingComment] = useState(false);
 
   const isHead = isCommitteeHead(committeeId);
+  // Any member of the committee can add a task, not just the head — a volunteer
+  // needs somewhere to write down their own work. The DB backs this up: see
+  // supabase/volunteer_create_tasks.sql. Heads still own assignment, priority
+  // and deletion of anyone else's tasks.
+  const canAddTask = isHead || isCommitteeMember(committeeId);
 
   // `silent` skips the full-page loading spinner — used for background
   // refreshes (realtime events, post-save re-fetches) so the screen doesn't
@@ -213,9 +208,8 @@ export default function CommitteeTaskBoard() {
       setAllProfiles(everyone ?? []);
     }
 
-    const [{ data: taskRows, error: taskError }, { data: fileRows }, { data: messageRows }, { data: readRow }] = await Promise.all([
-      supabase.from('tasks').select('id, title, assignee_id, status, priority, due_date').eq('committee_id', committeeId).order('created_at', { ascending: true }),
-      supabase.from('committee_files').select('id, file_name, file_size_bytes, storage_path, uploaded_by, created_at').eq('committee_id', committeeId).order('created_at', { ascending: false }),
+    const [{ data: taskRows, error: taskError }, { data: messageRows }, { data: readRow }] = await Promise.all([
+      supabase.from('tasks').select('id, title, assignee_id, status, priority, due_date, created_by').eq('committee_id', committeeId).order('created_at', { ascending: true }),
       supabase.from('committee_messages').select('id, body, user_id, created_at').eq('committee_id', committeeId).order('created_at', { ascending: true }),
       // Unread baseline. maybeSingle() because there's no row until the first
       // time this person opens the chat.
@@ -249,17 +243,6 @@ export default function CommitteeTaskBoard() {
       const match = committeeProfiles.find(p => p.id === userId);
       return match?.full_name || match?.email || 'Unknown';
     };
-
-    setFiles(
-      (fileRows ?? []).map(f => ({
-        id: f.id,
-        fileName: f.file_name,
-        fileSizeBytes: f.file_size_bytes,
-        storagePath: f.storage_path,
-        uploadedByName: nameFor(f.uploaded_by),
-        createdAt: new Date(f.created_at).toLocaleString(),
-      }))
-    );
 
     setMessages(
       (messageRows ?? []).map(m => ({
@@ -529,10 +512,18 @@ export default function CommitteeTaskBoard() {
 
   const addTask = async () => {
     if (!newTaskTitle.trim()) return;
+    // created_by must be the signed-in user or the insert fails RLS (the policy
+    // in volunteer_create_tasks.sql requires created_by = auth.uid(), so that
+    // nobody can file a task under someone else's name). Bail early rather than
+    // sending a null and showing a generic failure.
+    if (!profile?.id) {
+      toast.error('Could not add that task — please refresh and try again.');
+      return;
+    }
     const { data, error } = await supabase
       .from('tasks')
-      .insert({ committee_id: committeeId, title: newTaskTitle.trim(), status: 'todo', priority: 'medium', created_by: profile?.id })
-      .select('id, title, assignee_id, status, priority, due_date')
+      .insert({ committee_id: committeeId, title: newTaskTitle.trim(), status: 'todo', priority: 'medium', created_by: profile.id })
+      .select('id, title, assignee_id, status, priority, due_date, created_by')
       .single();
     if (!error && data) {
       setTasks(prev => [...prev, mapTaskRow(data)]);
@@ -552,52 +543,6 @@ export default function CommitteeTaskBoard() {
       loadEverything({ silent: true });
     } else {
       toast.success('Task deleted');
-    }
-  };
-
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0 || !profile) return;
-    setIsUploading(true);
-    let failed = 0;
-    for (const file of Array.from(e.target.files)) {
-      const storagePath = `${committeeId}/${Date.now()}-${file.name}`;
-      const { error: uploadError } = await supabase.storage.from('committee-files').upload(storagePath, file);
-      if (!uploadError) {
-        await supabase.from('committee_files').insert({
-          committee_id: committeeId,
-          uploaded_by: profile.id,
-          storage_path: storagePath,
-          file_name: file.name,
-          file_size_bytes: file.size,
-        });
-      } else {
-        failed++;
-      }
-    }
-    setIsUploading(false);
-    e.target.value = '';
-    loadEverything({ silent: true });
-    if (failed > 0) {
-      toast.error(`${failed} file${failed !== 1 ? 's' : ''} failed to upload.`);
-    } else {
-      toast.success('Uploaded');
-    }
-  };
-
-  const downloadFile = async (f: CommitteeFile) => {
-    const { data } = await supabase.storage.from('committee-files').createSignedUrl(f.storagePath, 60);
-    if (data?.signedUrl) window.open(data.signedUrl, '_blank');
-  };
-
-  const deleteFile = async (f: CommitteeFile) => {
-    setFiles(prev => prev.filter(x => x.id !== f.id));
-    const { error: removeError } = await supabase.storage.from('committee-files').remove([f.storagePath]);
-    const { error: deleteError } = await supabase.from('committee_files').delete().eq('id', f.id);
-    if (removeError || deleteError) {
-      toast.error('Could not delete that file.');
-      loadEverything({ silent: true });
-    } else {
-      toast.success('File deleted');
     }
   };
 
@@ -800,8 +745,15 @@ export default function CommitteeTaskBoard() {
   // edits are held in `draftTask` and nothing writes to the DB until Save.
   const renderTaskRow = (task: Task) => {
     const isOwnTask = task.assigneeId === profile?.id;
-    const canEditFull = isHead;
-    const canEditStatus = isHead || isOwnTask;
+    // A task you added yourself, that nobody else has been put on, is yours to
+    // manage: title, priority, due date. Once a head assigns it to someone else
+    // it becomes the committee's work item and only they can change it.
+    // Mirrors guard_task_update() in supabase/volunteer_create_tasks.sql —
+    // keep the two in step, or the UI will offer edits the DB silently reverts.
+    const isMyOwnCreation =
+      !!profile?.id && task.createdBy === profile.id && (!task.assigneeId || isOwnTask);
+    const canEditFull = isHead || isMyOwnCreation;
+    const canEditStatus = isHead || isOwnTask || isMyOwnCreation;
     const canEditAny = canEditFull || canEditStatus;
     const isEditing = editingTaskId === task.id;
     const due = dueState(task.dueDate, task.status);
@@ -823,9 +775,13 @@ export default function CommitteeTaskBoard() {
           <div className="md:col-span-2 flex items-center gap-2">
             <span className="md:hidden text-xs text-gray-400 w-16 shrink-0">Assignee</span>
             {canEditFull ? (
+              // Only a head may hand work to someone else. On your own task the
+              // list is just you, so you can claim or release it but not assign
+              // it to a colleague — the DB would revert that anyway, and an
+              // option that silently does nothing is worse than no option.
               <select value={draftTask.assigneeId ?? ''} onChange={e => updateDraftField('assigneeId', e.target.value)} className="w-full px-2 py-1 border border-indigo-300 rounded text-sm focus:outline-none focus:border-indigo-500">
                 <option value="">Unassigned</option>
-                {members.map(m => (
+                {(isHead ? members : members.filter(m => m.id === profile?.id)).map(m => (
                   <option key={m.id} value={m.id}>{m.full_name || m.email}</option>
                 ))}
               </select>
@@ -1051,7 +1007,7 @@ export default function CommitteeTaskBoard() {
               <Table2 className="h-4 w-4" /> Lists
             </Link>
             <button onClick={() => { setShowFiles(!showFiles); setShowChat(false); setShowMembers(false); }} className={`px-4 py-2 rounded-lg flex items-center gap-2 border text-sm font-medium transition-colors ${showFiles ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}>
-              <Upload className="h-4 w-4" /> Files {files.length > 0 && <span className="bg-indigo-100 text-indigo-800 text-xs px-1.5 py-0.5 rounded-full">{files.length}</span>}
+              <Upload className="h-4 w-4" /> Files
             </button>
           </div>
         </div>
@@ -1142,7 +1098,7 @@ export default function CommitteeTaskBoard() {
             <div className="divide-y divide-gray-100">
               {tasks.length === 0 && !showAddTask && (
                 <div className="px-4 py-10 text-center text-sm text-gray-400">
-                  No tasks yet. {isHead && <>Click <span className="font-medium text-indigo-600">+ Add Task</span> to get started.</>}
+                  No tasks yet. {canAddTask && <>Click <span className="font-medium text-indigo-600">+ Add Task</span> to get started.</>}
                 </div>
               )}
               {tasks.length > 0 && visibleTasks.length === 0 && (
@@ -1163,7 +1119,7 @@ export default function CommitteeTaskBoard() {
                   ))
                 : visibleTasks.map(renderTaskRow)}
 
-              {isHead && (showAddTask ? (
+              {canAddTask && (showAddTask ? (
                 <div className="flex flex-col md:grid md:grid-cols-12 gap-2 px-4 py-3 bg-indigo-50 md:items-center">
                   <div className="md:col-span-5">
                     <input type="text" value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTask()} placeholder="Enter task title..." autoFocus className="w-full px-3 py-1.5 border border-indigo-300 rounded text-sm focus:outline-none focus:border-indigo-500" />
@@ -1268,34 +1224,13 @@ export default function CommitteeTaskBoard() {
 
           {/* Files Panel */}
           {showFiles && (
-            <div className="w-72 bg-white rounded-lg shadow flex flex-col">
+            <div className="w-full max-w-full sm:w-96 bg-white rounded-lg shadow flex flex-col">
               <div className="flex items-center justify-between px-4 py-3 bg-slate-800 rounded-t-lg">
                 <h3 className="font-semibold text-white">Files</h3>
                 <button onClick={() => setShowFiles(false)}><X className="h-4 w-4 text-slate-300 hover:text-white" /></button>
               </div>
-              <div className="p-3 border-b">
-                <label className="cursor-pointer block">
-                  <div className="border-2 border-dashed border-indigo-200 rounded-lg p-4 text-center hover:bg-indigo-50 transition-colors">
-                    <Upload className="h-6 w-6 text-indigo-400 mx-auto mb-1" />
-                    <p className="text-sm text-indigo-600 font-medium">{isUploading ? 'Uploading...' : 'Upload files'}</p>
-                    <p className="text-xs text-gray-400 mt-0.5">Any format</p>
-                  </div>
-                  <input type="file" multiple className="hidden" onChange={handleUpload} disabled={isUploading} />
-                </label>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                {files.length === 0
-                  ? <p className="text-xs text-gray-400 text-center mt-6">No files yet</p>
-                  : files.map(f => (
-                    <div key={f.id} className="flex items-start justify-between bg-gray-50 rounded p-2 gap-2">
-                      <button className="flex-1 min-w-0 text-left" onClick={() => downloadFile(f)}>
-                        <p className="text-xs font-medium text-gray-900 truncate hover:text-indigo-600">{f.fileName}</p>
-                        <p className="text-xs text-gray-400">{formatBytes(f.fileSizeBytes)} · {f.uploadedByName}</p>
-                        <p className="text-xs text-gray-300">{f.createdAt}</p>
-                      </button>
-                      <button onClick={() => deleteFile(f)} className="text-gray-300 hover:text-red-400 mt-0.5"><X className="h-3.5 w-3.5" /></button>
-                    </div>
-                  ))}
+              <div className="flex-1 overflow-y-auto p-3">
+                <FolderBrowser committeeId={committeeId} canManage={isHead} canUpload={isCommitteeMember(committeeId)} />
               </div>
             </div>
           )}

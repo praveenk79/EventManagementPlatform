@@ -2,7 +2,29 @@
 
 Read this before re-exploring the codebase. Update it whenever a structural
 change is made (new table, new page, new realtime channel, new auth rule).
-Last updated: 2026-07-24.
+Last updated: 2026-07-28.
+
+## Multi-tenancy (Company > Event > Committee) — added 2026-07-27/28
+The app is becoming a multi-tenant SaaS. Full history/rationale lives in
+`MULTI_TENANT_PLAN.md` — read that first for anything tenancy-related.
+- **`companies` + `company_members`** (`supabase/companies.sql`, run
+  2026-07-27) — the tenant layer. `is_admin()` is now company-scoped (same
+  signature). One person belongs to one company.
+- **`events` + `committees.event_id` + `program_days.event_id`**
+  (`supabase/events.sql`, run 2026-07-28) — the event layer between company
+  and committee. `committees.slug` and `program_days.day_number` are now
+  unique **per-event**, not globally. `is_committee_member()` /
+  `is_committee_head()` are now correctly scoped to the committee's own
+  company (previously any company admin could reach any committee — fixed
+  here). New helpers: `is_event_admin(event_id)`, `is_event_member(event_id)`.
+- Currently exactly one company ("Default Company") and one event ("Default
+  Event") exist — everything backfilled cleanly, app click-tested working.
+- **Not yet built**: create-event UI / event switcher (step 2b, in progress),
+  company provisioning UI (step 1b, deferred until after 2b).
+- **Still open, independent of tenancy**: `profiles` policy leaks every
+  user's name/email across companies (not fixed by either migration —
+  scoped out both times to keep files small); `vendors.sql` is still an
+  empty shell (see "Vendor management" below).
 
 ## Stack
 Next.js 15 (App Router, Turbopack) + React 19 + Supabase (Postgres, Auth,
@@ -115,7 +137,16 @@ events. Re-check with that query if realtime ever appears silently inert.
   `committee_list_rows`, `committee_list_columns` (filtered by `list_id`).
 - `auth-context.tsx` → channel `profile-roles-${userId}`: own `profiles` row
   UPDATE, own `committee_members` rows (added 2026-07-24).
-- All depend on `enable_realtime.sql` having been run.
+- `FolderBrowser.tsx` (used by both `committee/[id]/page.tsx` and
+  `/documents`) → channel `folders-${committeeId}`: `committee_folders`,
+  `committee_files` (filtered by `committee_id`) (added 2026-07-25).
+- `/vendors` → channel `vendors-directory`: `vendors`, unfiltered (added
+  2026-07-25).
+- All depend on `enable_realtime.sql` having been run — `committee_folders`
+  additionally needs `alter publication supabase_realtime add table
+  public.committee_folders;` (see the bottom of `folder_management.sql`), and
+  `vendors` needs the equivalent `alter publication ... add table
+  public.vendors;` (see the bottom of `vendors.sql`).
 
 ## UI feedback pattern
 - Toasts via `sonner` (`<Toaster/>` mounted in `src/app/layout.tsx`).
@@ -255,11 +286,118 @@ hydration mismatches. Default mobile-first, layer desktop with `sm:`/`md:`.
   `min-w-0`+`truncate` on the text and `shrink-0` on the actions; metadata rows
   use `flex-wrap`.
 
+## Folder management (Documents) — added 2026-07-25
+Replaces the old flat per-committee file list with Google-Drive-style nested
+folders, plus a top-level `/documents` section. Spec: `specs/folder-management.md`.
+Schema: `supabase/folder_management.sql` — **CONFIRMED RUN 2026-07-25** by the
+user in the Supabase SQL Editor. Note this file **replaced** the storage.objects
+SELECT policy from `schema.sql` (~line 596) with "View committee files and shared
+files"; if file downloads ever break, that is the policy to look at.
+**Not yet browser click-tested** — typecheck/lint/build pass only.
+- **`committee_folders (id, committee_id, parent_id, name, visibility,
+  created_by, created_at)`** — a folder is a real row with a `parent_id`, not a
+  storage path prefix, so renaming/moving never rewrites storage paths.
+  `visibility` is `'committee'` (default) or `'everyone'`; UI copy says "This
+  committee only" / "Shared with everyone" — never "public". A DB trigger
+  blocks cycles and caps nesting at 10 levels.
+- **`committee_files` gained `folder_id` (null = committee root), `doc_type`**
+  (`invoice | contract | receipt | template | reference | other`, optional)
+  **and `vendor_id`** (nullable — became a real FK once `vendors.sql` ran, see
+  "Vendor management" below).
+- **Storage path format is unchanged**: `${committeeId}/${Date.now()}-${file.name}`.
+  Folders are purely a database concept; moving a file between folders is a
+  single `UPDATE committee_files SET folder_id = ...`, never a storage
+  copy/move. This is also why the storage bucket's SELECT policy (in the same
+  SQL file) had to be widened separately from the `committee_files` table
+  policy — Storage doesn't know about folders, only about `file_is_shared()`.
+- **`src/lib/folders.ts`** — pure helpers (`buildBreadcrumbs`, `childrenOf`,
+  `DOC_TYPES`). `buildBreadcrumbs` caps at 20 hops so a malformed cycle can't
+  hang a render.
+- **`src/components/FolderBrowser.tsx`** — the reusable Drive-style browser
+  (one level shown at a time + breadcrumbs), used by both
+  `committee/[id]/page.tsx` (files panel, replacing the old flat list) and
+  `/documents`. Props: `committeeId`, `canManage` (create/rename/delete
+  folders, move files — heads/admins), `canUpload` (committee members).
+  Drag-and-drop is upload-only (native HTML5 drag events, no DnD library) —
+  drag-to-*move* between folders is explicitly out of scope. New-folder and
+  rename both use the per-row Save/Cancel pattern below, not a modal. Deleting
+  a non-empty folder is blocked client-side with an item count (mirrors the DB
+  `on delete restrict` on `parent_id`).
+- Realtime: channel `folders-${committeeId}` on `committee_folders` and
+  `committee_files`, filtered by `committee_id`.
+- **`/documents`** (`src/app/documents/page.tsx`) — lists the committees the
+  viewer belongs to (or all, if admin), renders `FolderBrowser` for whichever
+  one is selected, plus a read-only "Shared with everyone" section querying
+  `committee_folders` where `visibility = 'everyone'` across every committee.
+- **Nav**: `Documents` added to `navItems` in `Navigation.tsx` on the same
+  condition as `Committees` (`isAdmin || committeeRoles.length > 0`) — appears
+  in both the desktop nav and the mobile tab bar automatically.
+
+## Vendor management — added 2026-07-25
+A shared, event-wide supplier directory (caterer, printer, AV, hotel,
+florist) — replaces per-committee WhatsApp threads and phone contacts.
+Spec: `specs/vendor-management.md`. Schema: `supabase/vendors.sql` —
+**delivered as a file, NOT yet confirmed run by the user** (this pass was
+UI-only per the task; typecheck/lint/build pass, but the table doesn't exist
+in the live DB until that SQL is run in the Supabase SQL Editor). Run
+`folder_management.sql` first if it hasn't been — `vendors.sql` depends on
+the `committee_files.vendor_id` column it added.
+- **`vendors (id, name, category, contact_name, email, phone, website, notes,
+  status, owning_committee_id, created_by, created_at, updated_at)`** —
+  event-wide, not committee-owned (`owning_committee_id` is nullable and is a
+  "who do I ask" pointer, not a permission boundary). Unique index on
+  `lower(trim(name))` — duplicate names are rejected by the DB with a
+  Postgres unique-violation (code `23505`), which the UI catches and shows as
+  "A vendor called "X" already exists." rather than the raw error.
+  `updated_at` is trigger-maintained; never set from the client. `category`
+  is free text with UI suggestions, not an enum.
+- **RLS**: every authenticated (non-deleted) user can read the whole
+  directory; heads-or-admins insert/update; admins-only delete (real delete,
+  not soft — vendors carry no history of their own; their documents survive
+  via `committee_files.vendor_id on delete set null`).
+- **`src/lib/vendors.ts`** — pure helpers: `VendorStatus`, `Vendor`,
+  `VENDOR_STATUSES` (pill tone strings, mirrors the task status/priority pill
+  convention in `committee/[id]/page.tsx`), `CATEGORY_SUGGESTIONS`,
+  `mapVendorRow`, `normalizeWebsite` (prepends `https://` to a bare domain
+  like `acme.com` so `<a href>` doesn't resolve it as a relative in-app path).
+- **`src/app/vendors/page.tsx`** — single-page directory, no detail route.
+  Search (name/category/contact, client-side) + status filter. Per-row
+  Save/Cancel edit mode (same `editingId`/draft/`startEdit`/`saveEdit`/
+  `cancelEdit` pattern as `editingTaskId`/`draftTask` in
+  `committee/[id]/page.tsx`) covers every field including status and owning
+  committee. Add-vendor is an inline form, not a modal. Delete is admin-only
+  behind an inline red confirm panel that also points at the status-change
+  alternative. Expandable row (`expandedId`, same pattern as task comments'
+  `expandedTaskId`) reveals notes plus that vendor's linked documents (joined
+  by querying `committee_files` where `vendor_id is not null`, grouped
+  client-side — small dataset, no per-vendor query). `canManage = isAdmin ||
+  committeeRoles.some(r => r.role === 'head')`.
+- **`FolderBrowser.tsx` gained a vendor-link dropdown** on each file row
+  (heads/admins only, same single-field-saves-instantly pattern as the
+  existing move-to-folder dropdown — not a Save/Cancel draft). Loads
+  `vendors(id, name)` once on mount; shows a disabled "No vendors yet" option
+  if the directory is empty rather than hiding the control. A small indigo
+  pill shows the linked vendor's name on the file row.
+- Realtime: channel `vendors-directory` on `vendors`, unfiltered (the table
+  has no natural scoping column and the whole directory is visible to
+  everyone anyway) — does a full silent reload rather than an incremental
+  patch, since the list is small.
+- **Nav**: `Vendors` added to `navItems` in `Navigation.tsx` on the same
+  condition as `Documents`/`Committees`. This pushed the mobile bottom tab bar
+  to 6 items for admins (5 for everyone else). Rather than drop/hide an item
+  at 320px, each tab now uses `flex-1 min-w-0` with a truncating label and a
+  slightly smaller icon/font (`h-5 w-5`, `text-[10px]`) so 6 tabs divide the
+  width evenly without wrapping; the bar's outer container also gained
+  `overflow-x-auto` as a fallback if a future 7th item still doesn't fit.
+
 ## Pages
 - `/` — landing/home.
-- `/committee/[id]` — main committee workspace: tasks, files, chat, members.
+- `/committee/[id]` — main committee workspace: tasks, files (now folder-based,
+  see above), chat, members.
 - `/committee/[id]/lists` — index of spreadsheet-like lists for a committee.
 - `/committee/[id]/lists/[listId]` — one list (dynamic columns/rows).
+- `/documents` — top-level Documents section (see "Folder management" above).
+- `/vendors` — event-wide vendor directory (see "Vendor management" above).
 - `/admin-committees`, `/admin-users`, `/admin-templates` — admin management.
 - `/admin` — admin dashboard landing.
 - `/programs` — event-wide schedule (program days/sessions), admin-editable.
@@ -267,6 +405,41 @@ hydration mismatches. Default mobile-first, layer desktop with `sm:`/`md:`.
   `/speaker` — mostly legacy/stub pages from the pre-migration prototype, not
   the current production surface. `/events-management` and `/events` are
   known unimplemented stubs (deferred multi-event support).
+
+## Volunteers can create tasks — added 2026-07-25
+Previously only heads could create tasks, so a volunteer had nowhere to record
+their own work (they had to ask a head, which in practice meant WhatsApp). Now
+any committee member can. Schema: `supabase/volunteer_create_tasks.sql` —
+**delivered as a file; must be run in the SQL Editor or the UI will offer an Add
+Task button that fails RLS.** This deferred the planned "Todos" feature entirely.
+
+**This file REPLACES `guard_task_update()`** from `schema.sql` (~line 330) and all
+three write policies on `tasks`. If task editing misbehaves, look there first.
+The resulting rules, which the UI must stay in step with:
+
+| Task | Volunteer can change |
+|---|---|
+| They created it, unassigned or assigned to self | title, priority, due date, status; claim/release; delete |
+| A head created it and assigned it to them | status only (unchanged from before) |
+| Anyone else's | nothing — view only |
+
+- Insert requires `created_by = auth.uid()` (no filing tasks under another
+  person's name) and, for non-heads, `assignee_id` must be null or self.
+- UI: `canAddTask` (line ~172) and `isMyOwnCreation`/`canEditFull`/`canEditStatus`
+  in `renderTaskRow` (~line 740) of `committee/[id]/page.tsx`. `Task` gained
+  `createdBy` and both task `select` queries now fetch `created_by` — the edit
+  rules depend on it, so don't drop it from those selects.
+- The assignee dropdown is filtered to just yourself for non-heads, because the
+  DB reverts assigning to a third party and an option that silently does nothing
+  is worse than no option.
+- **KNOWN ROUGH EDGE (pre-existing, deliberately not fixed):**
+  `guard_task_update()` *silently reverts* fields the caller may not change
+  instead of raising — so an unauthorized edit shows a success toast and then
+  snaps back with no explanation. Raising instead would break the status-only
+  update path volunteers use daily. The real fix is UI-side (hide/disable those
+  fields), which is why `canEditFull` gating matters.
+- **Not browser click-tested.** Verify with a second Google account that is a
+  volunteer (not head) — the test list is at the bottom of the SQL file.
 
 ## Open issues — unresolved, pick up here
 - **Unread chat badge does not show a count (2026-07-24, DEFERRED by user after

@@ -1,0 +1,65 @@
+-- ============================================================================
+-- Event Platform — vendor management
+--
+-- WHAT THIS IS FOR
+-- One place for every supplier the event deals with: caterer, printer, AV crew,
+-- hotel, florist. Today that lives in someone's phone contacts and a WhatsApp
+-- thread. This gives each vendor a row with contact details, which committee
+-- owns the relationship, and a link to their invoices and contracts.
+--
+-- HOW TO RUN
+-- Supabase Dashboard -> SQL Editor -> paste this whole file -> Run.
+-- Additive only: creates one table and turns the existing unused
+-- committee_files.vendor_id column into a real foreign key. Nothing is dropped.
+-- Safe to re-run.
+--
+-- RUN supabase/folder_management.sql FIRST — this file expects the vendor_id
+-- column that file added. If you have not run it, this one will fail with
+-- "column vendor_id does not exist", which is harmless: run that first, then
+-- come back to this.
+--
+-- ONE DESIGN NOTE WORTH KNOWING
+-- Vendors are event-wide, NOT owned by a committee — the opposite of folders.
+-- A caterer serves the whole event; the Food committee just manages the
+-- relationship. If each committee had its own vendor list you would get the
+-- same caterer entered three times, with three different phone numbers, and no
+-- way to see the total picture. So: one shared directory, with an optional
+-- "which committee looks after this one" pointer.
+-- ============================================================================
+
+
+
+
+-- ============================================================================
+-- REALTIME
+-- After running this, add vendors to the realtime publication so a vendor one
+-- person adds shows up for everyone else without a refresh:
+--
+--   alter publication supabase_realtime add table public.vendors;
+--
+-- (Skip if already there — re-adding raises a harmless error.)
+-- ============================================================================
+
+-- ============================================================================
+-- CHECK IT WORKED
+--
+--   -- 1. Table exists and is empty:
+--   select count(*) from public.vendors;                    -- 0
+--
+--   -- 2. Four policies present (select / insert / update / delete):
+--   select policyname, cmd from pg_policies where tablename = 'vendors';
+--
+--   -- 3. The documents link is a real foreign key now:
+--   select conname from pg_constraint
+--    where conname = 'committee_files_vendor_id_fkey';      -- 1 row
+--
+--   -- 4. Realtime picked it up:
+--   select tablename from pg_publication_tables
+--    where pubname = 'supabase_realtime' and tablename = 'vendors';
+--
+--   -- 5. Sanity-check the duplicate guard — this second insert should FAIL
+--   --    with a unique violation, which is correct behaviour:
+--   -- insert into public.vendors (name) values ('Test Caterer');
+--   -- insert into public.vendors (name) values ('test caterer');   -- errors
+--   -- delete from public.vendors where lower(name) = 'test caterer';
+-- ============================================================================
