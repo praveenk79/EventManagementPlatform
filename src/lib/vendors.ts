@@ -1,6 +1,8 @@
 // Vendor directory — pure helpers, no React.
-// See supabase/vendors.sql for the schema these mirror. Vendors are
-// event-wide (not committee-owned) — see that file's header for why.
+// See supabase/vendors.sql + supabase/vendors_decouple.sql for the schema
+// these mirror. Vendors are company-wide and deliberately have no
+// relationship to committees at all — no owning committee, no committee-
+// scoped documents (see vendors_decouple.sql for why that tie was removed).
 
 export type VendorStatus = 'potential' | 'active' | 'past' | 'rejected';
 
@@ -14,7 +16,6 @@ export interface Vendor {
   website: string | null;
   notes: string;
   status: VendorStatus;
-  owningCommitteeId: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -57,7 +58,6 @@ export function mapVendorRow(row: Record<string, unknown>): Vendor {
     website: (row.website as string | null) ?? null,
     notes: (row.notes as string | null) ?? '',
     status: (row.status as VendorStatus) ?? 'potential',
-    owningCommitteeId: (row.owning_committee_id as string | null) ?? null,
     createdBy: (row.created_by as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,

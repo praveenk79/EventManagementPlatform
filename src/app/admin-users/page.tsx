@@ -5,6 +5,7 @@ import { Users, Shield, Edit2, Save, Loader2, Trash2, RotateCcw, AlertTriangle }
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
+import { useEvent } from '@/lib/event-context';
 import type { Profile, Committee, CommitteeRole, SystemRole } from '@/lib/rbac';
 import AdminNav from '@/components/AdminNav';
 import { useRequireAdmin } from '@/lib/use-require-admin';
@@ -36,6 +37,7 @@ const permissionMatrix: Record<SystemRole, { icon: string; description: string; 
 export default function AdminUserManagement() {
   const { allowed, checking } = useRequireAdmin();
   const { profile: currentUser } = useAuth();
+  const { events } = useEvent();
   const supabase = createClient();
   const [profiles, setProfiles] = useState<ManagedProfile[]>([]);
   const [committees, setCommittees] = useState<Committee[]>([]);
@@ -56,7 +58,7 @@ export default function AdminUserManagement() {
     setIsLoading(true);
     const [{ data: profileRows }, { data: committeeRows }, { data: membershipRows }] = await Promise.all([
       supabase.from('profiles').select('id, email, full_name, avatar_url, system_role, deleted_at').order('email'),
-      supabase.from('committees').select('*'),
+      supabase.from('committees').select('*').eq('archived', false),
       supabase.from('committee_members').select('committee_id, user_id, role'),
     ]);
     setProfiles((profileRows ?? []) as ManagedProfile[]);
@@ -70,6 +72,19 @@ export default function AdminUserManagement() {
   }, [load]);
 
   const membershipsForUser = (userId: string) => memberships.filter(m => m.user_id === userId);
+
+  // Group committees by event for the assignment picker below — an admin
+  // assigning someone needs to know which event each committee belongs to,
+  // not just its name (a company can now have more than one event).
+  const committeesByEvent = new Map<string, Committee[]>();
+  for (const c of committees) {
+    const list = committeesByEvent.get(c.event_id) ?? [];
+    list.push(c);
+    committeesByEvent.set(c.event_id, list);
+  }
+  const committeeEventGroups = events
+    .filter(e => committeesByEvent.has(e.id))
+    .map(e => ({ event: e, committees: committeesByEvent.get(e.id)! }));
 
   // Soft delete: the profile row stays so their name keeps showing on the tasks
   // and messages they left behind — only their access goes away. The RPC does
@@ -266,45 +281,52 @@ export default function AdminUserManagement() {
 
                         <div>
                           <h4 className="text-sm font-semibold text-gray-900 mb-3">Committee Roles</h4>
-                          <div className="space-y-2 max-h-64 overflow-y-auto">
-                            {committees
-                              .filter(c => !c.archived)
-                              .map(committee => {
-                                const hasRole = editingCommitteeRoles.some(c => c.committeeId === committee.id);
-                                const currentRole = editingCommitteeRoles.find(c => c.committeeId === committee.id)?.role;
-                                return (
-                                  <div key={committee.id} className="flex items-center gap-3">
-                                    <input
-                                      type="checkbox"
-                                      checked={hasRole}
-                                      onChange={() => toggleCommitteeRole(committee.id, 'volunteer')}
-                                      className="rounded w-4 h-4"
-                                    />
-                                    <label className="flex-1">
-                                      <div className="font-medium text-gray-900">{committee.name}</div>
-                                      <div className="text-xs text-gray-500">
-                                        {hasRole ? (currentRole === 'head' ? 'Committee Head' : 'Volunteer') : 'Not assigned'}
+                          <div className="space-y-4 max-h-64 overflow-y-auto">
+                            {committeeEventGroups.map(({ event, committees: eventCommittees }) => (
+                              <div key={event.id}>
+                                {committeeEventGroups.length > 1 && (
+                                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">{event.name}</div>
+                                )}
+                                <div className="space-y-2">
+                                  {eventCommittees.map(committee => {
+                                    const hasRole = editingCommitteeRoles.some(c => c.committeeId === committee.id);
+                                    const currentRole = editingCommitteeRoles.find(c => c.committeeId === committee.id)?.role;
+                                    return (
+                                      <div key={committee.id} className="flex items-center gap-3">
+                                        <input
+                                          type="checkbox"
+                                          checked={hasRole}
+                                          onChange={() => toggleCommitteeRole(committee.id, 'volunteer')}
+                                          className="rounded w-4 h-4"
+                                        />
+                                        <label className="flex-1">
+                                          <div className="font-medium text-gray-900">{committee.name}</div>
+                                          <div className="text-xs text-gray-500">
+                                            {hasRole ? (currentRole === 'head' ? 'Committee Head' : 'Volunteer') : 'Not assigned'}
+                                          </div>
+                                        </label>
+                                        {hasRole && (
+                                          <select
+                                            value={currentRole || 'volunteer'}
+                                            onChange={e =>
+                                              setEditingCommitteeRoles(
+                                                editingCommitteeRoles.map(c =>
+                                                  c.committeeId === committee.id ? { ...c, role: e.target.value as CommitteeRole } : c
+                                                )
+                                              )
+                                            }
+                                            className="px-2 py-1 border border-gray-200 rounded text-xs"
+                                          >
+                                            <option value="head">Head</option>
+                                            <option value="volunteer">Volunteer</option>
+                                          </select>
+                                        )}
                                       </div>
-                                    </label>
-                                    {hasRole && (
-                                      <select
-                                        value={currentRole || 'volunteer'}
-                                        onChange={e =>
-                                          setEditingCommitteeRoles(
-                                            editingCommitteeRoles.map(c =>
-                                              c.committeeId === committee.id ? { ...c, role: e.target.value as CommitteeRole } : c
-                                            )
-                                          )
-                                        }
-                                        className="px-2 py-1 border border-gray-200 rounded text-xs"
-                                      >
-                                        <option value="head">Head</option>
-                                        <option value="volunteer">Volunteer</option>
-                                      </select>
-                                    )}
-                                  </div>
-                                );
-                              })}
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ))}
                           </div>
                         </div>
 

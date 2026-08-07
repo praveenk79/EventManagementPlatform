@@ -34,12 +34,7 @@ type BrowserFile = {
   createdAt: string;
   folderId: string | null;
   docType: DocType | null;
-  vendorId: string | null;
 };
-
-// Just enough to populate the "link to vendor" dropdown — the vendors table
-// itself is owned by src/lib/vendors.ts / src/app/vendors/page.tsx.
-type VendorOption = { id: string; name: string };
 
 interface FolderBrowserProps {
   committeeId: string;
@@ -87,10 +82,6 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
   const [isLoading, setIsLoading] = useState(true);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
 
-  // Vendors for the "link to vendor" dropdown — id + name only, loaded once on
-  // mount (the directory itself is small and rarely changes mid-session).
-  const [vendors, setVendors] = useState<VendorOption[]>([]);
-
   // New-folder inline form (matches the existing add-task pattern — no modal).
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -134,7 +125,7 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
         .eq('committee_id', committeeId),
       supabase
         .from('committee_files')
-        .select('id, file_name, file_size_bytes, storage_path, uploaded_by, created_at, folder_id, doc_type, vendor_id')
+        .select('id, file_name, file_size_bytes, storage_path, uploaded_by, created_at, folder_id, doc_type')
         .eq('committee_id', committeeId),
     ]);
 
@@ -167,24 +158,14 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
         createdAt: new Date(f.created_at).toLocaleString(),
         folderId: f.folder_id,
         docType: (f.doc_type as DocType | null) ?? null,
-        vendorId: (f.vendor_id as string | null) ?? null,
       }))
     );
     setIsLoading(false);
   }, [committeeId, supabase]);
 
-  const loadVendors = useCallback(async () => {
-    const { data } = await supabase.from('vendors').select('id, name').order('name');
-    setVendors(data ?? []);
-  }, [supabase]);
-
   useEffect(() => {
     load();
   }, [load]);
-
-  useEffect(() => {
-    loadVendors();
-  }, [loadVendors]);
 
   // If the folder we're viewing was deleted or moved out from under us
   // (another head acting concurrently), fall back to the root rather than
@@ -225,8 +206,6 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
     generate();
     return () => { cancelled = true; };
   }, [files, supabase]);
-
-  const vendorNameById = useMemo(() => new Map(vendors.map(v => [v.id, v.name])), [vendors]);
 
   const breadcrumbs = buildBreadcrumbs(folders, currentFolderId);
   const visibleFolders = childrenOf(folders, currentFolderId);
@@ -482,20 +461,6 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
     }
   };
 
-  // Linking a vendor is the same single-field, save-instantly control as
-  // moving a file — one dropdown, one column, no multi-field draft needed.
-  const linkVendor = async (f: BrowserFile, targetVendorId: string | null) => {
-    if (targetVendorId === f.vendorId) return;
-    setFiles(prev => prev.map(x => (x.id === f.id ? { ...x, vendorId: targetVendorId } : x)));
-    const { error } = await supabase.from('committee_files').update({ vendor_id: targetVendorId }).eq('id', f.id);
-    if (error) {
-      toast.error('Could not link that vendor.');
-      load();
-    } else {
-      toast.success('Vendor updated');
-    }
-  };
-
   // ---- Drag-to-upload ---------------------------------------------------------
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -686,10 +651,10 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
                   </button>
                   {canManage && (
                     <div className="flex items-center gap-1 shrink-0">
-                      <button onClick={() => startEditFolder(folder)} title="Rename" className="p-2 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors">
+                      <button onClick={() => startEditFolder(folder)} title="Rename" className="p-2 text-gray-500 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors">
                         <Pencil className="h-4 w-4" />
                       </button>
-                      <button onClick={() => deleteFolder(folder)} title="Delete" className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors">
+                      <button onClick={() => deleteFolder(folder)} title="Delete" className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded transition-colors">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
@@ -724,30 +689,10 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
                     {docTypeLabel(f.docType) && (
                       <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[11px] font-medium">{docTypeLabel(f.docType)}</span>
                     )}
-                    {f.vendorId && vendorNameById.get(f.vendorId) && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-[11px] font-medium">{vendorNameById.get(f.vendorId)}</span>
-                    )}
                   </p>
                 </div>
                 {/* Actions — stop propagation so row click doesn't fire */}
-                <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
-                  {canManage && (
-                    <select
-                      value={f.vendorId ?? ''}
-                      onChange={e => linkVendor(f, e.target.value || null)}
-                      title="Link to vendor"
-                      className="px-2 py-2 border border-gray-200 rounded text-xs bg-white focus:outline-none focus:border-indigo-400 max-w-[140px]"
-                    >
-                      <option value="">No vendor</option>
-                      {vendors.length === 0 ? (
-                        <option value="" disabled>No vendors yet</option>
-                      ) : (
-                        vendors.map(v => (
-                          <option key={v.id} value={v.id}>{v.name}</option>
-                        ))
-                      )}
-                    </select>
-                  )}
+                <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                   {canManage && (
                     <select
                       value={f.folderId ?? ''}
@@ -761,11 +706,11 @@ export default function FolderBrowser({ committeeId, canManage, canUpload }: Fol
                       ))}
                     </select>
                   )}
-                  <button onClick={() => downloadFile(f)} title="Download" className="p-2 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors">
+                  <button onClick={() => downloadFile(f)} title="Download" className="p-2 text-gray-500 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors">
                     <Download className="h-4 w-4" />
                   </button>
                   {canManage && (
-                    <button onClick={() => deleteFile(f)} title="Delete" className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors">
+                    <button onClick={() => deleteFile(f)} title="Delete" className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded transition-colors">
                       <Trash2 className="h-4 w-4" />
                     </button>
                   )}

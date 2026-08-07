@@ -18,11 +18,11 @@ import {
   ExternalLink,
   FileText,
   Download,
+  Upload,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
-import type { Committee } from '@/lib/rbac';
 import { DOC_TYPES, type DocType } from '@/lib/folders';
 import {
   VENDOR_STATUSES,
@@ -37,7 +37,6 @@ type VendorDoc = {
   id: string;
   fileName: string;
   docType: DocType | null;
-  committeeName: string;
   storagePath: string;
 };
 
@@ -56,7 +55,6 @@ type VendorDraft = {
   website: string;
   notes: string;
   status: VendorStatus;
-  owningCommitteeId: string;
 };
 
 const emptyDraft: VendorDraft = {
@@ -68,7 +66,6 @@ const emptyDraft: VendorDraft = {
   website: '',
   notes: '',
   status: 'potential',
-  owningCommitteeId: '',
 };
 
 export default function VendorsPage() {
@@ -76,7 +73,6 @@ export default function VendorsPage() {
   const { user, profile, isAdmin, committeeRoles, loading: authLoading } = useAuth();
 
   const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [committees, setCommittees] = useState<Committee[]>([]);
   const [docsByVendor, setDocsByVendor] = useState<Record<string, VendorDoc[]>>({});
   const [isLoading, setIsLoading] = useState(true);
 
@@ -96,44 +92,31 @@ export default function VendorsPage() {
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Heads are the ones actually talking to suppliers — admins too. Not
-  // restricted to the owning committee: a wrong phone number should be
-  // fixable by whoever notices it. Mirrors the vendors.sql RLS policies.
+  const [attachOpenId, setAttachOpenId] = useState<string | null>(null);
+  const [attachDocType, setAttachDocType] = useState<DocType | ''>('');
+  const [attachFile, setAttachFile] = useState<File | null>(null);
+  const [isAttaching, setIsAttaching] = useState(false);
+  const [isDeletingDoc, setIsDeletingDoc] = useState<string | null>(null);
+
+  // Heads are the ones actually talking to suppliers — admins too. Mirrors
+  // the vendors.sql RLS policies (is_any_committee_head()).
   const canManage = isAdmin || committeeRoles.some(r => r.role === 'head');
 
   const load = useCallback(async () => {
     setIsLoading(true);
-    const [{ data: vendorRows }, { data: committeeRows }, { data: docRows }] = await Promise.all([
+    const [{ data: vendorRows }, { data: docRows }] = await Promise.all([
       supabase.from('vendors').select('*').order('name'),
-      supabase.from('committees').select('*').eq('archived', false).order('name'),
-      supabase
-        .from('committee_files')
-        .select('id, file_name, doc_type, storage_path, vendor_id, committee_id')
-        .not('vendor_id', 'is', null),
+      supabase.from('vendor_files').select('*').order('created_at'),
     ]);
 
     setVendors((vendorRows ?? []).map(mapVendorRow));
-    setCommittees(committeeRows ?? []);
-
-    const committeeNameById = new Map((committeeRows ?? []).map(c => [c.id, c.name]));
-    // A document's committee might be one the viewer isn't otherwise loading
-    // (archived, or simply not in the active list above) — fall back to a
-    // second lookup for any ids missing from the map, same pattern as
-    // /documents' shared-folder lookup.
-    const missingIds = Array.from(new Set((docRows ?? []).map(d => d.committee_id))).filter(id => !committeeNameById.has(id));
-    if (missingIds.length > 0) {
-      const { data: extra } = await supabase.from('committees').select('id, name').in('id', missingIds);
-      for (const c of extra ?? []) committeeNameById.set(c.id, c.name);
-    }
 
     const grouped: Record<string, VendorDoc[]> = {};
     for (const d of docRows ?? []) {
-      if (!d.vendor_id) continue;
       const doc: VendorDoc = {
         id: d.id,
         fileName: d.file_name,
         docType: (d.doc_type as DocType | null) ?? null,
-        committeeName: committeeNameById.get(d.committee_id) ?? 'Unknown committee',
         storagePath: d.storage_path,
       };
       (grouped[d.vendor_id] ??= []).push(doc);
@@ -156,6 +139,7 @@ export default function VendorsPage() {
     const channel = supabase
       .channel('vendors-directory')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'vendors' }, silentReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'vendor_files' }, silentReload)
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
@@ -171,7 +155,6 @@ export default function VendorsPage() {
     website: v.website ?? '',
     notes: v.notes,
     status: v.status,
-    owningCommitteeId: v.owningCommitteeId ?? '',
   });
 
   const startEdit = (v: Vendor) => {
@@ -195,7 +178,6 @@ export default function VendorsPage() {
     website: d.website.trim() || null,
     notes: d.notes,
     status: d.status,
-    owning_committee_id: d.owningCommitteeId || null,
   });
 
   // Duplicate-name handling: the unique index on lower(trim(name)) means a
@@ -250,7 +232,6 @@ export default function VendorsPage() {
                 website: editDraft.website.trim() || null,
                 notes: editDraft.notes,
                 status: editDraft.status,
-                owningCommitteeId: editDraft.owningCommitteeId || null,
               }
             : v
         )
@@ -275,8 +256,86 @@ export default function VendorsPage() {
   };
 
   const downloadDoc = async (doc: VendorDoc) => {
-    const { data } = await supabase.storage.from('committee-files').createSignedUrl(doc.storagePath, 60);
+    const { data } = await supabase.storage.from('vendor-files').createSignedUrl(doc.storagePath, 60);
     if (data?.signedUrl) window.open(data.signedUrl, '_blank');
+  };
+
+  const openAttach = (vendor: Vendor) => {
+    setAttachOpenId(vendor.id);
+    setAttachDocType('');
+    setAttachFile(null);
+  };
+
+  const closeAttach = () => {
+    setAttachOpenId(null);
+    setAttachDocType('');
+    setAttachFile(null);
+  };
+
+  // Uploads straight into the vendor's own storage — no committee involved
+  // at all. Path is organizational only now (${vendorId}/${Date.now()}-
+  // ${fileName}), not RLS-load-bearing like the committee-files bucket's
+  // path convention is.
+  const attachDocument = async (vendor: Vendor) => {
+    if (!attachFile || !profile) return;
+    setIsAttaching(true);
+
+    const storagePath = `${vendor.id}/${Date.now()}-${attachFile.name}`;
+    const { error: uploadError } = await supabase.storage.from('vendor-files').upload(storagePath, attachFile);
+    if (uploadError) {
+      setIsAttaching(false);
+      toast.error('Could not upload that file.');
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('vendor_files')
+      .insert({
+        vendor_id: vendor.id,
+        uploaded_by: profile.id,
+        storage_path: storagePath,
+        file_name: attachFile.name,
+        file_size_bytes: attachFile.size,
+        doc_type: attachDocType || null,
+      })
+      .select('id, file_name, doc_type, storage_path')
+      .single();
+    setIsAttaching(false);
+
+    if (error || !data) {
+      toast.error('Could not attach that file.');
+      return;
+    }
+
+    setDocsByVendor(prev => ({
+      ...prev,
+      [vendor.id]: [
+        ...(prev[vendor.id] ?? []),
+        { id: data.id, fileName: data.file_name, docType: (data.doc_type as DocType | null) ?? null, storagePath: data.storage_path },
+      ],
+    }));
+
+    toast.success('Document attached');
+    closeAttach();
+  };
+
+  // A real delete now — a vendor_files row only ever exists because of its
+  // vendor, so removing it should delete the storage object too, not leave
+  // an orphaned file nobody can find (unlike the old committee-side "unlink,
+  // keep the file" behaviour, which made sense when a committee also had a
+  // claim on the file).
+  const deleteDoc = async (vendorId: string, doc: VendorDoc) => {
+    setIsDeletingDoc(doc.id);
+    const { error: deleteRowError } = await supabase.from('vendor_files').delete().eq('id', doc.id);
+    if (deleteRowError) {
+      setIsDeletingDoc(null);
+      toast.error('Could not delete that document.');
+      return;
+    }
+    await supabase.storage.from('vendor-files').remove([doc.storagePath]);
+    setDocsByVendor(prev => ({ ...prev, [vendorId]: (prev[vendorId] ?? []).filter(d => d.id !== doc.id) }));
+    setIsDeletingDoc(null);
+    toast.success('Document deleted');
   };
 
   const visibleVendors = vendors
@@ -369,10 +428,10 @@ export default function VendorsPage() {
             </button>
           </div>
 
-          {/* Second row of edit fields — email/website/owning committee/notes,
-              kept out of the 12-col grid above since they don't need a
-              read-only column of their own on desktop. */}
-          <div className="md:col-span-12 grid grid-cols-1 sm:grid-cols-3 gap-2 mt-1">
+          {/* Second row of edit fields — email/website/notes, kept out of the
+              12-col grid above since they don't need a read-only column of
+              their own on desktop. */}
+          <div className="md:col-span-12 grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
             <input
               type="email"
               value={editDraft.email}
@@ -387,16 +446,6 @@ export default function VendorsPage() {
               placeholder="Website (e.g. acme.com)"
               className="px-2 py-1 border border-indigo-300 rounded text-sm focus:outline-none focus:border-indigo-500"
             />
-            <select
-              value={editDraft.owningCommitteeId}
-              onChange={e => setEditDraft(d => ({ ...d, owningCommitteeId: e.target.value }))}
-              className="px-2 py-1 border border-indigo-300 rounded text-sm bg-white focus:outline-none focus:border-indigo-500"
-            >
-              <option value="">No owning committee</option>
-              {committees.map(c => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
           </div>
           <div className="md:col-span-12 mt-1">
             <textarea
@@ -465,12 +514,12 @@ export default function VendorsPage() {
           </div>
           <div className="md:col-span-1 flex items-center justify-end gap-1">
             {canManage && (
-              <button onClick={() => startEdit(vendor)} title="Edit" className="p-1.5 hover:bg-indigo-50 rounded text-gray-300 hover:text-indigo-500 transition-colors">
+              <button onClick={() => startEdit(vendor)} title="Edit" className="p-1.5 hover:bg-indigo-50 rounded text-gray-500 hover:text-indigo-500 transition-colors">
                 <Pencil className="h-4 w-4" />
               </button>
             )}
             {isAdmin && (
-              <button onClick={() => setConfirmDeleteId(vendor.id)} title="Delete" className="p-1.5 hover:bg-red-50 rounded text-gray-300 hover:text-red-500 transition-colors">
+              <button onClick={() => setConfirmDeleteId(vendor.id)} title="Delete" className="p-1.5 hover:bg-red-50 rounded text-gray-500 hover:text-red-500 transition-colors">
                 <Trash2 className="h-4 w-4" />
               </button>
             )}
@@ -506,8 +555,8 @@ export default function VendorsPage() {
           </div>
         )}
 
-        {/* Expandable row — notes plus linked documents (from FolderBrowser's
-            vendor-link dropdown). */}
+        {/* Expandable row — notes plus documents attached directly to this
+            vendor (see attachDocument/openAttach above). */}
         {isExpanded && (
           <div className="px-4 pb-4 pt-1 bg-gray-50 border-t border-gray-100">
             <div className="md:pl-2 space-y-3">
@@ -516,11 +565,21 @@ export default function VendorsPage() {
                 <p className="text-sm text-gray-700 whitespace-pre-wrap">{vendor.notes || 'No notes yet.'}</p>
               </div>
               <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Documents</p>
-                {docs.length === 0 ? (
-                  <p className="text-sm text-gray-400">No documents linked yet. Link one from a committee&apos;s Files panel.</p>
-                ) : (
-                  <div className="space-y-1.5">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Documents</p>
+                  {canManage && attachOpenId !== vendor.id && (
+                    <button onClick={() => openAttach(vendor)} className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700">
+                      <Upload className="h-3.5 w-3.5" /> Attach document
+                    </button>
+                  )}
+                </div>
+
+                {docs.length === 0 && attachOpenId !== vendor.id && (
+                  <p className="text-sm text-gray-400">No documents attached yet.</p>
+                )}
+
+                {docs.length > 0 && (
+                  <div className="space-y-1.5 mb-2">
                     {docs.map(doc => (
                       <div key={doc.id} className="flex items-center justify-between gap-2 bg-white border border-gray-100 rounded-lg px-3 py-2">
                         <div className="flex items-center gap-2 min-w-0">
@@ -529,13 +588,58 @@ export default function VendorsPage() {
                           {docTypeLabel(doc.docType) && (
                             <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[11px] font-medium">{docTypeLabel(doc.docType)}</span>
                           )}
-                          <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium">{doc.committeeName}</span>
                         </div>
-                        <button onClick={() => downloadDoc(doc)} title="Download" className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors shrink-0">
-                          <Download className="h-4 w-4" />
-                        </button>
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button onClick={() => downloadDoc(doc)} title="Download" className="p-1.5 text-gray-500 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors">
+                            <Download className="h-4 w-4" />
+                          </button>
+                          {canManage && (
+                            <button
+                              onClick={() => deleteDoc(vendor.id, doc)}
+                              disabled={isDeletingDoc === doc.id}
+                              title="Delete"
+                              className="p-1.5 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                            >
+                              {isDeletingDoc === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {attachOpenId === vendor.id && (
+                  <div className="flex flex-col gap-2 bg-white border border-indigo-200 rounded-lg p-3">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="file"
+                        onChange={e => setAttachFile(e.target.files?.[0] ?? null)}
+                        className="flex-1 text-sm file:mr-2 file:px-3 file:py-1.5 file:rounded file:border-0 file:bg-indigo-50 file:text-indigo-700 file:text-xs file:font-medium"
+                      />
+                      <select
+                        value={attachDocType}
+                        onChange={e => setAttachDocType(e.target.value as DocType | '')}
+                        className="px-2 py-1.5 border border-gray-200 rounded text-sm bg-white focus:outline-none focus:border-indigo-400"
+                      >
+                        <option value="">No document type</option>
+                        {DOC_TYPES.map(d => (
+                          <option key={d.value} value={d.value}>{d.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => attachDocument(vendor)}
+                        disabled={isAttaching || !attachFile}
+                        className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {isAttaching ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Upload'}
+                      </button>
+                      <button onClick={closeAttach} disabled={isAttaching} className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300 disabled:opacity-50">
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -669,16 +773,6 @@ export default function VendorsPage() {
                   >
                     {VENDOR_STATUSES.map(s => (
                       <option key={s.value} value={s.value}>{s.label}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={addDraft.owningCommitteeId}
-                    onChange={e => setAddDraft(d => ({ ...d, owningCommitteeId: e.target.value }))}
-                    className="px-3 py-1.5 border border-indigo-300 rounded text-sm bg-white focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="">No owning committee</option>
-                    {committees.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
                     ))}
                   </select>
                 </div>
