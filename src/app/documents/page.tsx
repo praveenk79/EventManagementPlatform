@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { FolderOpen, Share2, Loader2 } from 'lucide-react';
+import { FolderOpen, Share2, Loader2, Info } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-context';
+import { useEvent } from '@/lib/event-context';
 import { getUserCommittees, type Committee } from '@/lib/rbac';
 import FolderBrowser from '@/components/FolderBrowser';
 
@@ -12,10 +13,12 @@ type SharedFolderRow = {
   name: string;
   committeeId: string;
   committeeName: string;
+  eventName: string;
 };
 
 export default function DocumentsPage() {
   const { user, committeeRoles, isAdmin, loading: authLoading } = useAuth();
+  const { events } = useEvent();
   const supabase = createClient();
 
   const [committees, setCommittees] = useState<Committee[]>([]);
@@ -38,24 +41,30 @@ export default function DocumentsPage() {
       .select('id, name, committee_id')
       .eq('visibility', 'everyone');
     const committeeNameById = new Map(all.map(c => [c.id, c.name]));
+    const committeeEventById = new Map(all.map(c => [c.id, c.event_id]));
     // A shared folder in a committee the viewer isn't part of and that wasn't
     // in the `archived = false` list above still needs a name — fall back to
     // a second lookup for any committee ids missing from the map.
     const missingIds = Array.from(new Set((sharedRows ?? []).map(r => r.committee_id))).filter(id => !committeeNameById.has(id));
     if (missingIds.length > 0) {
-      const { data: extraCommittees } = await supabase.from('committees').select('id, name').in('id', missingIds);
-      for (const c of extraCommittees ?? []) committeeNameById.set(c.id, c.name);
+      const { data: extraCommittees } = await supabase.from('committees').select('id, name, event_id').in('id', missingIds);
+      for (const c of extraCommittees ?? []) {
+        committeeNameById.set(c.id, c.name);
+        committeeEventById.set(c.id, c.event_id);
+      }
     }
+    const eventNameById = new Map(events.map(e => [e.id, e.name]));
     setSharedFolders(
       (sharedRows ?? []).map(r => ({
         id: r.id,
         name: r.name,
         committeeId: r.committee_id,
         committeeName: committeeNameById.get(r.committee_id) ?? 'Unknown committee',
+        eventName: eventNameById.get(committeeEventById.get(r.committee_id) ?? '') ?? 'Unknown event',
       }))
     );
     setIsLoading(false);
-  }, [supabase]);
+  }, [supabase, events]);
 
   useEffect(() => {
     if (authLoading || !user) return;
@@ -64,6 +73,18 @@ export default function DocumentsPage() {
 
   const userCommittees = getUserCommittees(committees, committeeRoles, isAdmin);
   const selectedCommittee = userCommittees.find(c => c.id === selectedCommitteeId) ?? null;
+
+  // Group the picker by event so committees from different events are never
+  // shown in one undifferentiated list.
+  const committeesByEvent = new Map<string, Committee[]>();
+  for (const c of userCommittees) {
+    const list = committeesByEvent.get(c.event_id) ?? [];
+    list.push(c);
+    committeesByEvent.set(c.event_id, list);
+  }
+  const eventGroups = events
+    .filter(e => committeesByEvent.has(e.id))
+    .map(e => ({ event: e, committees: committeesByEvent.get(e.id)! }));
 
   if (authLoading || isLoading) {
     return (
@@ -83,6 +104,15 @@ export default function DocumentsPage() {
           <p className="text-gray-500 text-sm mt-1">Folders and files for the groups you belong to.</p>
         </div>
 
+        <div className="mb-6 flex items-start gap-2 rounded-lg bg-indigo-50 p-3 text-sm text-indigo-900">
+          <Info className="h-4 w-4 mt-0.5 shrink-0 text-indigo-500" />
+          <p>
+            Folders belong to a committee. Pick a committee on the left to view or add its
+            folders and files. Folders marked &quot;Shared with everyone&quot; also show up in
+            the section below, visible to the whole event.
+          </p>
+        </div>
+
         {userCommittees.length === 0 ? (
           <div className="bg-white rounded-lg shadow-sm p-8 text-center text-gray-500">
             You&apos;re not part of any committee yet, so there are no folders to show. Ask a committee head to add you.
@@ -91,17 +121,24 @@ export default function DocumentsPage() {
           <div className="flex flex-col gap-4 md:flex-row">
             {/* Committee picker */}
             <div className="w-full md:w-56 shrink-0">
-              <div className="bg-white rounded-lg shadow-sm p-2 flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-visible">
-                {userCommittees.map(c => (
-                  <button
-                    key={c.id}
-                    onClick={() => setSelectedCommitteeId(c.id)}
-                    className={`px-3 py-2 rounded-lg text-sm font-medium text-left whitespace-nowrap shrink-0 transition-colors ${
-                      selectedCommitteeId === c.id ? 'bg-indigo-600 text-white' : 'text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    {c.name}
-                  </button>
+              <div className="bg-white rounded-lg shadow-sm p-2 flex flex-row md:flex-col gap-3 overflow-x-auto md:overflow-visible">
+                {eventGroups.map(({ event, committees: eventCommittees }) => (
+                  <div key={event.id} className="flex flex-row md:flex-col gap-1 shrink-0">
+                    {eventGroups.length > 1 && (
+                      <span className="px-3 pt-1 text-[11px] font-semibold text-gray-400 uppercase tracking-wide">{event.name}</span>
+                    )}
+                    {eventCommittees.map(c => (
+                      <button
+                        key={c.id}
+                        onClick={() => setSelectedCommitteeId(c.id)}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium text-left whitespace-nowrap shrink-0 transition-colors ${
+                          selectedCommitteeId === c.id ? 'bg-indigo-600 text-white' : 'text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </div>
             </div>
@@ -134,7 +171,10 @@ export default function DocumentsPage() {
                     <FolderOpen className="h-5 w-5 text-emerald-500 shrink-0" />
                     <span className="text-sm font-medium text-gray-900 truncate">{f.name}</span>
                   </div>
-                  <span className="shrink-0 px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs font-medium">{f.committeeName}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-xs font-medium">{f.eventName}</span>
+                    <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs font-medium">{f.committeeName}</span>
+                  </div>
                 </div>
               ))}
             </div>

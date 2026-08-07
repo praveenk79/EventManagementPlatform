@@ -509,7 +509,7 @@ export default function ProgramsPage() {
                                 <div className="flex gap-1 shrink-0 print:hidden">
                                   <button
                                     onClick={() => duplicateSession(day.id, session)}
-                                    className="p-2 self-start text-gray-300 hover:text-green-600 transition-colors"
+                                    className="p-2 self-start text-gray-500 hover:text-green-600 transition-colors"
                                     title="Duplicate session"
                                     aria-label="Duplicate session"
                                   >
@@ -517,7 +517,7 @@ export default function ProgramsPage() {
                                   </button>
                                   <button
                                     onClick={() => startEditSession(day.id, session)}
-                                    className="p-2 self-start text-gray-300 hover:text-indigo-600 transition-colors"
+                                    className="p-2 self-start text-gray-500 hover:text-indigo-600 transition-colors"
                                     title="Edit session"
                                     aria-label="Edit session"
                                   >
@@ -525,7 +525,7 @@ export default function ProgramsPage() {
                                   </button>
                                   <button
                                     onClick={() => deleteSession(day.id, session.id)}
-                                    className="p-2 -mr-2 self-start text-gray-300 hover:text-red-600 transition-colors"
+                                    className="p-2 -mr-2 self-start text-gray-500 hover:text-red-600 transition-colors"
                                     title="Delete session"
                                     aria-label="Delete session"
                                   >

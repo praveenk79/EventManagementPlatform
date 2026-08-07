@@ -4,11 +4,13 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Users, Unlock, Award, ArrowRight, Loader2 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
+import { useEvent } from '@/lib/event-context';
 import { createClient } from '@/lib/supabase/client';
 import { getUserCommittees, getCommitteeRole, type Committee } from '@/lib/rbac';
 
 export default function CommitteePortal() {
   const { user, profile, committeeRoles, isAdmin, loading: authLoading } = useAuth();
+  const { events } = useEvent();
   const [committees, setCommittees] = useState<Committee[]>([]);
   const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -40,6 +42,20 @@ export default function CommitteePortal() {
   }, [authLoading, user]);
 
   const userCommittees = getUserCommittees(committees, committeeRoles, isAdmin);
+
+  // Group by event so committees from different events are never shown
+  // interleaved with no indication of which event they belong to. `events`
+  // is already RLS-scoped to ones this user is actually a member of.
+  const eventNameById = new Map(events.map(e => [e.id, e.name]));
+  const committeesByEvent = new Map<string, Committee[]>();
+  for (const c of userCommittees) {
+    const list = committeesByEvent.get(c.event_id) ?? [];
+    list.push(c);
+    committeesByEvent.set(c.event_id, list);
+  }
+  const eventSections = events
+    .filter(e => committeesByEvent.has(e.id))
+    .map(e => ({ event: e, committees: committeesByEvent.get(e.id)! }));
 
   if (authLoading || isLoading) {
     return (
@@ -94,55 +110,69 @@ export default function CommitteePortal() {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {userCommittees.map(committee => {
-                const committeeRole = getCommitteeRole(committeeRoles, committee.id);
-                const canManage = isAdmin || committeeRole === 'head';
+            <div className="space-y-8">
+              {eventSections.map(({ event, committees: eventCommittees }) => (
+                <div key={event.id}>
+                  {eventSections.length > 1 && (
+                    <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">{event.name}</h3>
+                  )}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {eventCommittees.map(committee => {
+                      const committeeRole = getCommitteeRole(committeeRoles, committee.id);
+                      const canManage = isAdmin || committeeRole === 'head';
 
-                return (
-                  <div
-                    key={committee.id}
-                    className="bg-white rounded-lg shadow-sm hover:shadow-lg transition-shadow p-6 border-l-4 border-indigo-600"
-                  >
-                    <div className="flex items-start justify-between mb-4">
-                      <div className="flex-1">
-                        <h3 className="text-xl font-semibold text-gray-900">{committee.name}</h3>
-                        <p className="text-sm text-gray-600 mt-1">{committee.description}</p>
-                      </div>
-                      {canManage && <Unlock className="h-5 w-5 text-green-600 flex-shrink-0" />}
-                    </div>
+                      return (
+                        <div
+                          key={committee.id}
+                          className="bg-white rounded-lg shadow-sm hover:shadow-lg transition-shadow p-6 border-l-4 border-indigo-600"
+                        >
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex-1">
+                              <h3 className="text-xl font-semibold text-gray-900">{committee.name}</h3>
+                              <p className="text-sm text-gray-600 mt-1">{committee.description}</p>
+                              {eventSections.length === 1 && (
+                                <span className="inline-block mt-2 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium">
+                                  {eventNameById.get(committee.event_id) ?? 'Unknown event'}
+                                </span>
+                              )}
+                            </div>
+                            {canManage && <Unlock className="h-5 w-5 text-green-600 flex-shrink-0" />}
+                          </div>
 
-                    <div className="space-y-3 mb-6">
-                      <div className="flex items-center gap-2 text-sm text-gray-600">
-                        <Award className="h-4 w-4" />
-                        <span>
-                          Your Role:{' '}
-                          <span
-                            className={`font-semibold px-2 py-1 rounded text-xs ${
-                              committeeRole === 'head' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
-                            }`}
+                          <div className="space-y-3 mb-6">
+                            <div className="flex items-center gap-2 text-sm text-gray-600">
+                              <Award className="h-4 w-4" />
+                              <span>
+                                Your Role:{' '}
+                                <span
+                                  className={`font-semibold px-2 py-1 rounded text-xs ${
+                                    committeeRole === 'head' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {isAdmin && !committeeRole ? 'Admin (all access)' : committeeRole === 'head' ? 'Committee Head' : 'Volunteer'}
+                                </span>
+                              </span>
+                            </div>
+                            <div className="text-sm text-gray-600">
+                              <span>
+                                {memberCounts[committee.id] ?? 0} member{(memberCounts[committee.id] ?? 0) !== 1 ? 's' : ''}
+                              </span>
+                            </div>
+                          </div>
+
+                          <Link
+                            href={`/committee/${committee.id}`}
+                            className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2 transition-colors"
                           >
-                            {isAdmin && !committeeRole ? 'Admin (all access)' : committeeRole === 'head' ? 'Committee Head' : 'Volunteer'}
-                          </span>
-                        </span>
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        <span>
-                          {memberCounts[committee.id] ?? 0} member{(memberCounts[committee.id] ?? 0) !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                    </div>
-
-                    <Link
-                      href={`/committee/${committee.id}`}
-                      className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2 transition-colors"
-                    >
-                      View Tasks
-                      <ArrowRight className="h-4 w-4" />
-                    </Link>
+                            View Tasks
+                            <ArrowRight className="h-4 w-4" />
+                          </Link>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>

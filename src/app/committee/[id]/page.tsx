@@ -887,19 +887,19 @@ export default function CommitteeTaskBoard() {
             onClick={() => { setExpandedTaskId(isExpanded ? null : task.id); setNewComment(''); }}
             title={taskComments.length > 0 ? `${taskComments.length} comment${taskComments.length !== 1 ? 's' : ''}` : 'Add a note'}
             className={`p-1 rounded transition-colors flex items-center gap-0.5 ${
-              isExpanded ? 'text-indigo-600 bg-indigo-50' : taskComments.length > 0 ? 'text-indigo-500 hover:bg-indigo-50' : 'text-gray-300 hover:text-indigo-500 hover:bg-indigo-50'
+              isExpanded ? 'text-indigo-600 bg-indigo-50' : taskComments.length > 0 ? 'text-indigo-500 hover:bg-indigo-50' : 'text-gray-500 hover:text-indigo-500 hover:bg-indigo-50'
             }`}
           >
             <MessageSquare className="h-4 w-4" />
             {taskComments.length > 0 && <span className="text-xs font-semibold">{taskComments.length}</span>}
           </button>
           {canEditAny && (
-            <button onClick={() => startEditTask(task)} title="Edit" className="p-1 hover:bg-indigo-50 rounded text-gray-300 hover:text-indigo-500 transition-colors">
+            <button onClick={() => startEditTask(task)} title="Edit" className="p-1 hover:bg-indigo-50 rounded text-gray-500 hover:text-indigo-500 transition-colors">
               <Pencil className="h-4 w-4" />
             </button>
           )}
           {canEditFull && (
-            <button onClick={() => deleteTask(task.id)} title="Delete" className="p-1 hover:bg-red-50 rounded text-gray-300 hover:text-red-500 transition-colors">
+            <button onClick={() => deleteTask(task.id)} title="Delete" className="p-1 hover:bg-red-50 rounded text-gray-500 hover:text-red-500 transition-colors">
               <Trash2 className="h-4 w-4" />
             </button>
           )}
@@ -934,7 +934,7 @@ export default function CommitteeTaskBoard() {
                       <button
                         onClick={() => deleteComment(c.id)}
                         title="Delete note"
-                        className="p-1.5 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                        className="p-1.5 rounded text-gray-500 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -1209,7 +1209,7 @@ export default function CommitteeTaskBoard() {
                             onClick={() => removeMember(m.id)}
                             disabled={isSelf}
                             title={isSelf ? "You can't remove yourself" : 'Remove from committee'}
-                            className="p-1 text-gray-300 hover:text-red-500 disabled:opacity-30 disabled:hover:text-gray-300 transition-colors"
+                            className="p-1 text-gray-500 hover:text-red-500 disabled:opacity-30 disabled:hover:text-gray-300 transition-colors"
                           >
                             <X className="h-4 w-4" />
                           </button>

@@ -19,12 +19,40 @@ The app is becoming a multi-tenant SaaS. Full history/rationale lives in
   here). New helpers: `is_event_admin(event_id)`, `is_event_member(event_id)`.
 - Currently exactly one company ("Default Company") and one event ("Default
   Event") exist — everything backfilled cleanly, app click-tested working.
-- **Not yet built**: create-event UI / event switcher (step 2b, in progress),
-  company provisioning UI (step 1b, deferred until after 2b).
+- **Step 2b shipped** (undocumented until now — found during the 2026-08-06
+  event-isolation pass): `/admin-events` (`src/app/admin-events/page.tsx`) is
+  a real create-event UI, and `EventSwitcher` in `Navigation.tsx` lets an
+  admin pick their "current event," backed by `EventProvider`
+  (`src/lib/event-context.tsx`, mounted at the root layout — see "Event
+  scoping" below). Only company provisioning (step 1b) remains not built.
 - **Still open, independent of tenancy**: `profiles` policy leaks every
   user's name/email across companies (not fixed by either migration —
-  scoped out both times to keep files small); `vendors.sql` is still an
-  empty shell (see "Vendor management" below).
+  scoped out both times to keep files small).
+
+## Event scoping is per-page, not RLS-enforced — added 2026-08-06
+`EventProvider` (`src/lib/event-context.tsx`) is mounted at the root layout
+(`src/app/layout.tsx`), so `useEvent()` is callable from *any* page, not
+just admin ones (its own header comment undersells this — it says "admin
+screens" but nothing restricts it). Its `events` list is already correctly
+RLS-scoped per user (`is_event_member`), so calling it from a member-facing
+page returns exactly the events that user actually belongs to.
+
+**RLS does not enforce a single "current event."** It only enforces company
+and committee-membership boundaries — `is_committee_member()` happily
+returns committees across every event in a company an admin belongs to (or
+every committee a member is on, spanning multiple events). Filtering to one
+event, or grouping by event for display, is 100% opt-in per page — nothing
+stops a future page from forgetting it. An audit on 2026-08-06 found
+`committee-portal`, `my-tasks`, `documents`, and `admin-users`'
+committee-assignment picker were all missing this (interleaving committees
+from different events with no label), while `admin-committees`,
+`admin-tasks`, `admin`, and `programs` already filtered to `currentEventId`
+correctly. Fixed by grouping the four gap pages by event (via `useEvent()`
++ each committee's `event_id`) rather than restricting them to one current
+event — member-facing pages intentionally show everything a user belongs
+to, since committee membership can span multiple events. If you add a new
+page that lists committees/tasks/vendors/program items, decide its
+event-scoping explicitly; don't assume RLS already narrowed it.
 
 ## Stack
 Next.js 15 (App Router, Turbopack) + React 19 + Supabase (Postgres, Auth,
@@ -333,55 +361,79 @@ files"; if file downloads ever break, that is the policy to look at.
   condition as `Committees` (`isAdmin || committeeRoles.length > 0`) — appears
   in both the desktop nav and the mobile tab bar automatically.
 
-## Vendor management — added 2026-07-25
-A shared, event-wide supplier directory (caterer, printer, AV, hotel,
+## Vendor management — added 2026-07-25, decoupled from committees 2026-08-06
+A shared, **company-wide** supplier directory (caterer, printer, AV, hotel,
 florist) — replaces per-committee WhatsApp threads and phone contacts.
-Spec: `specs/vendor-management.md`. Schema: `supabase/vendors.sql` —
-**delivered as a file, NOT yet confirmed run by the user** (this pass was
-UI-only per the task; typecheck/lint/build pass, but the table doesn't exist
-in the live DB until that SQL is run in the Supabase SQL Editor). Run
-`folder_management.sql` first if it hasn't been — `vendors.sql` depends on
-the `committee_files.vendor_id` column it added.
-- **`vendors (id, name, category, contact_name, email, phone, website, notes,
-  status, owning_committee_id, created_by, created_at, updated_at)`** —
-  event-wide, not committee-owned (`owning_committee_id` is nullable and is a
-  "who do I ask" pointer, not a permission boundary). Unique index on
+Spec: `specs/vendor-management.md`. Schema: `supabase/vendors.sql` +
+`supabase/vendors_decouple.sql`.
+
+**History worth knowing**: `vendors.sql` was originally left as
+comments-only (no `create table`) for weeks after the UI was built —
+confirmed as a live bug twice before actually being created 2026-08-06.
+Once built, vendor documents were initially wired through the
+committee-scoped `committee_files`/`committee-files` storage bucket (an
+"owning committee" field, a committee picker on attach) — this turned out
+to be needless complexity forced by reusing committee-scoped storage, not a
+real product need. `vendors_decouple.sql` (same day) removed the tie
+entirely, both directions. **Vendors now have zero relationship to
+committees** — no owning committee, no committee-scoped documents. If
+`/vendors` or a document attach ever errors, check both SQL files were run,
+in order.
+- **`vendors (id, name, category, contact_name, email, phone, website,
+  notes, status, created_by, created_at, updated_at)`** — flat, company-wide,
+  no committee or event reference of any kind. Unique index on
   `lower(trim(name))` — duplicate names are rejected by the DB with a
-  Postgres unique-violation (code `23505`), which the UI catches and shows as
-  "A vendor called "X" already exists." rather than the raw error.
-  `updated_at` is trigger-maintained; never set from the client. `category`
-  is free text with UI suggestions, not an enum.
-- **RLS**: every authenticated (non-deleted) user can read the whole
-  directory; heads-or-admins insert/update; admins-only delete (real delete,
-  not soft — vendors carry no history of their own; their documents survive
-  via `committee_files.vendor_id on delete set null`).
+  Postgres unique-violation (code `23505`), which the UI catches and shows
+  as "A vendor called "X" already exists." rather than the raw error.
+  `updated_at` is trigger-maintained (`set_updated_at()`, same trigger
+  function `tasks`/`program_sessions` use); never set from the client.
+  `category` is free text with UI suggestions, not an enum.
+- **`vendor_files (id, vendor_id, file_name, file_size_bytes, storage_path,
+  doc_type, uploaded_by, created_at)`** — a vendor document's only home.
+  Independent table, independent **`vendor-files`** storage bucket (private).
+  Unlike the `committee-files` bucket, the storage path
+  (`${vendorId}/${Date.now()}-${fileName}`) is organizational only, not
+  RLS-load-bearing — permission doesn't depend on anything in the path.
+- **RLS**: select on both tables = `not is_deleted_user()` (everyone can
+  browse the directory and its documents); insert/delete = the shared
+  `is_any_committee_head()` helper (true for an admin, or anyone who heads
+  at least one committee) — no committee-membership check anywhere, since
+  there's no committee in the loop. No update policy on `vendor_files` — a
+  document is replaced by delete + re-attach, not edited in place. Vendor
+  delete (admin-only, real delete not soft) cascades to its `vendor_files`
+  rows via FK.
 - **`src/lib/vendors.ts`** — pure helpers: `VendorStatus`, `Vendor`,
   `VENDOR_STATUSES` (pill tone strings, mirrors the task status/priority pill
   convention in `committee/[id]/page.tsx`), `CATEGORY_SUGGESTIONS`,
   `mapVendorRow`, `normalizeWebsite` (prepends `https://` to a bare domain
   like `acme.com` so `<a href>` doesn't resolve it as a relative in-app path).
-- **`src/app/vendors/page.tsx`** — single-page directory, no detail route.
-  Search (name/category/contact, client-side) + status filter. Per-row
+- **`src/app/vendors/page.tsx`** — single-page directory, no detail route,
+  and (as of the decoupling) no dependency on `committees`/`useEvent()` at
+  all. Search (name/category/contact, client-side) + status filter. Per-row
   Save/Cancel edit mode (same `editingId`/draft/`startEdit`/`saveEdit`/
   `cancelEdit` pattern as `editingTaskId`/`draftTask` in
-  `committee/[id]/page.tsx`) covers every field including status and owning
-  committee. Add-vendor is an inline form, not a modal. Delete is admin-only
-  behind an inline red confirm panel that also points at the status-change
-  alternative. Expandable row (`expandedId`, same pattern as task comments'
-  `expandedTaskId`) reveals notes plus that vendor's linked documents (joined
-  by querying `committee_files` where `vendor_id is not null`, grouped
-  client-side — small dataset, no per-vendor query). `canManage = isAdmin ||
-  committeeRoles.some(r => r.role === 'head')`.
-- **`FolderBrowser.tsx` gained a vendor-link dropdown** on each file row
-  (heads/admins only, same single-field-saves-instantly pattern as the
-  existing move-to-folder dropdown — not a Save/Cancel draft). Loads
-  `vendors(id, name)` once on mount; shows a disabled "No vendors yet" option
-  if the directory is empty rather than hiding the control. A small indigo
-  pill shows the linked vendor's name on the file row.
-- Realtime: channel `vendors-directory` on `vendors`, unfiltered (the table
-  has no natural scoping column and the whole directory is visible to
-  everyone anyway) — does a full silent reload rather than an incremental
-  patch, since the list is small.
+  `committee/[id]/page.tsx`). Add-vendor is an inline form, not a modal.
+  Delete is admin-only behind an inline red confirm panel that also points
+  at the status-change alternative. Expandable row (`expandedId`, same
+  pattern as task comments' `expandedTaskId`) reveals notes plus that
+  vendor's documents (`supabase.from('vendor_files')`, grouped client-side
+  by `vendor_id`). `canManage = isAdmin || committeeRoles.some(r => r.role
+  === 'head')`.
+- **Attaching a document** (`openAttach`/`closeAttach`/`attachDocument` in
+  `vendors/page.tsx`): a file picker + optional doc-type select, nothing
+  else — no committee decision of any kind. Uploads straight to the
+  `vendor-files` bucket, inserts into `vendor_files` with `vendor_id` set at
+  insert time. **Delete is a real delete** (`deleteDoc` — removes both the
+  storage object and the row), not an unlink — a `vendor_files` row only
+  ever exists because of its vendor, so there's no other owner to leave it
+  behind for.
+- **`FolderBrowser.tsx` has no vendor awareness at all** — no fetch, no
+  pill, no link control. A committee's files and a vendor's documents are
+  now two fully independent things that happen to share nothing.
+- Realtime: channel `vendors-directory` subscribes to both `vendors` and
+  `vendor_files` (two `.on('postgres_changes', ...)` calls on one channel),
+  unfiltered — full silent reload rather than an incremental patch, since
+  the list is small.
 - **Nav**: `Vendors` added to `navItems` in `Navigation.tsx` on the same
   condition as `Documents`/`Committees`. This pushed the mobile bottom tab bar
   to 6 items for admins (5 for everyone else). Rather than drop/hide an item
@@ -390,8 +442,39 @@ the `committee_files.vendor_id` column it added.
   width evenly without wrapping; the bar's outer container also gained
   `overflow-x-auto` as a fallback if a future 7th item still doesn't fit.
 
+## My Tasks + personal todos — added 2026-08-06
+`/my-tasks` (`src/app/my-tasks/page.tsx`), unconditionally in nav (see
+`BASE_NAV_ITEMS` in `Navigation.tsx` — the only other unconditional items are
+Home/Program) since personal todos have no committee dependency, unlike every
+other gated nav item. Two independent sections:
+- **"Assigned to you"** — no new table. Queries `tasks` filtered to the
+  signed-in user's own committee ids (`getUserCommittees`, `rbac.ts`) and
+  `assignee_id = profile.id`, across every committee at once instead of one
+  at a time like `committee/[id]/page.tsx`. Status is editable inline
+  (single-field instant-save `<select>`, same status color mapping as the
+  committee page) — this page doesn't own the task, so no Save/Cancel here.
+- **"Your personal todos"** — a deliberately separate, fully private list for
+  things that were never a committee task (`supabase/personal_todos.sql`,
+  `personal_todos (id, user_id, text, due_date, done, created_at)`, RLS:
+  own-rows-only via a single `for all` policy, same shape as
+  `push_subscriptions.sql`). **No head/admin visibility anywhere, by
+  design** — this was explicitly requested as fully private. Per-row
+  Save/Cancel edit (text + due date) mirrors `vendors.tsx`'s
+  `editingId`/`editDraft`/`startEdit`/`cancelEdit` pattern; the done
+  checkbox and delete both save instantly, no confirm panel (low-stakes,
+  own data only). No realtime subscription — single-user data.
+- **History**: a separate personal-todo system was deliberately rejected in
+  July 2025 (risk of becoming a second place nobody checks; the real gap
+  then was volunteers couldn't create committee tasks, fixed by loosening
+  that permission instead). Revisited because the actual want was a private
+  capture list unrelated to committees — kept from repeating the old mistake
+  by living on the same page as the "Assigned to you" rollup, not a
+  freestanding page users have to remember to check.
+
 ## Pages
 - `/` — landing/home.
+- `/my-tasks` — personal dashboard: assigned committee tasks + private todos
+  (see above).
 - `/committee/[id]` — main committee workspace: tasks, files (now folder-based,
   see above), chat, members.
 - `/committee/[id]/lists` — index of spreadsheet-like lists for a committee.

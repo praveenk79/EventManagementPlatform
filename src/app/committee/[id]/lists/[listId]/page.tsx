@@ -367,10 +367,10 @@ export default function ListDetail() {
                           </div>
                         ) : (
                           <div className="flex items-center justify-center gap-1">
-                            <button onClick={() => startEditRow(row)} className="p-1 text-gray-300 hover:text-indigo-500 rounded transition-colors" title="Edit row">
+                            <button onClick={() => startEditRow(row)} className="p-1 text-gray-500 hover:text-indigo-500 rounded transition-colors" title="Edit row">
                               <Pencil className="h-4 w-4" />
                             </button>
-                            <button onClick={() => deleteRow(row.id)} className="p-1 text-gray-300 hover:text-red-500 rounded transition-colors" title="Delete row">
+                            <button onClick={() => deleteRow(row.id)} className="p-1 text-gray-500 hover:text-red-500 rounded transition-colors" title="Delete row">
                               <Trash2 className="h-4 w-4" />
                             </button>
                           </div>

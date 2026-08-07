@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
-import { LayoutGrid, Home, CalendarDays, Users2, ShieldCheck, FolderOpen, Store, ChevronDown, Check } from 'lucide-react';
+import { LayoutGrid, Home, CalendarDays, Users2, ShieldCheck, FolderOpen, Store, ListChecks, ChevronDown, Check } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { useEvent } from '@/lib/event-context';
 import UserMenu from './UserMenu';
@@ -11,6 +11,9 @@ import UserMenu from './UserMenu';
 const BASE_NAV_ITEMS = [
   { href: '/', label: 'Home', icon: Home, match: (p: string) => p === '/' },
   { href: '/programs', label: 'Program', icon: CalendarDays, match: (p: string) => p.startsWith('/programs') },
+  // Unconditional like Home/Program above — personal todos have no committee
+  // dependency, so this must be visible even to a user on zero committees.
+  { href: '/my-tasks', label: 'My Tasks', icon: ListChecks, match: (p: string) => p.startsWith('/my-tasks') },
 ];
 
 const COMMITTEE_NAV_ITEM = { href: '/committee-portal', label: 'Committees', icon: Users2, match: (p: string) => p.startsWith('/committee') };
